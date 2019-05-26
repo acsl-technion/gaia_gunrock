@@ -19,6 +19,40 @@
 #include <gunrock/util/memset_kernel.cuh>
 #include <gunrock/util/array_utils.cuh>
 
+// Utilities and correctness-checking
+#include <gunrock/util/test_utils.cuh>
+
+#include <gunrock/fileMap.cuh>
+
+typedef struct __stopwatch_t{
+     struct timeval begin;
+     struct timeval end;
+ }stopwatch;
+
+ void stopwatch_start(stopwatch *sw){
+     if (sw == NULL)
+         return;
+
+     bzero(&sw->begin, sizeof(struct timeval));
+     bzero(&sw->end  , sizeof(struct timeval));
+
+     gettimeofday(&sw->begin, NULL);
+ }
+
+ void stopwatch_stop(stopwatch *sw){
+     if (sw == NULL)
+         return;
+
+     gettimeofday(&sw->end, NULL);
+ }
+
+ double
+ get_interval_by_sec(stopwatch *sw){
+     if (sw == NULL)
+         return 0;
+     return ((double)(sw->end.tv_sec-sw->begin.tv_sec)+(double)(sw->end.tv_usec-sw->begin.tv_usec)/1000000);
+ }
+
 namespace gunrock {
 namespace app {
 namespace sssp {
@@ -65,6 +99,11 @@ struct SSSPProblem : ProblemBase<VertexId, SizeT, Value,
         // device storage arrays
         util::Array1D<SizeT, Value       >    distances  ;     /**< Used for source distance */
         util::Array1D<SizeT, Value       >    weights    ;     /**< Used for storing edge weights */
+        fileMapping<char> 					  map_addr	 ;	   /* Used for mmaping the weights onto GPU */
+        bool shared;
+        bool mmaped;
+        SizeT edges;            // Number of edges in the graph
+        std::string values_fname;
         //util::Array1D<SizeT, VertexId    >    visit_lookup;    /**< Used for check duplicate */
         //util::Array1D<SizeT, float       >    delta;
         //util::Array1D<SizeT, int         >    sssp_marker;
@@ -81,6 +120,8 @@ struct SSSPProblem : ProblemBase<VertexId, SizeT, Value,
             //visit_lookup    .SetName("visit_lookup"    );
             //delta           .SetName("delta"           );
             //sssp_marker     .SetName("sssp_marker"     );
+            shared= mmaped = false;
+            edges = 0;
         }
 
         /*
@@ -142,19 +183,27 @@ struct SSSPProblem : ProblemBase<VertexId, SizeT, Value,
             float queue_sizing = 2.0,
             float in_sizing    = 1.0,
             bool  skip_makeout_selection = false,
-            bool  keep_node_num = false)
+            bool  keep_node_num = false,
+            bool shared = false,
+            bool mmap_gpu = false)
         {
             cudaError_t retval  = cudaSuccess;
 
             // Check if there are negative weights.
-            if (HasNegativeValue(graph->edge_values, graph->edges)) {
-                GRError(gunrock::util::GR_UNSUPPORTED_INPUT_DATA,
-                        "Contains edges with negative weights. Dijkstra's algorithm"
-                        "doesn't support the input data.",
-                        __FILE__,
-                        __LINE__);
-                return retval;
-            }
+	   // If UVM is used skip this test in order not to bring data to CPU invain
+	    if (!shared && !mmap_gpu) {
+		    if (HasNegativeValue(graph->edge_values, graph->edges)) {
+		        GRError(gunrock::util::GR_UNSUPPORTED_INPUT_DATA,
+		                "Contains edges with negative weights. Dijkstra's algorithm"
+		                "doesn't support the input data.",
+		                __FILE__,
+		                __LINE__);
+		        return retval;
+		    }
+	    } else
+		printf("Skipped negative weights check because of shared mem\n");
+
+//UCM_DBG("enter calling BaseDataSlice init (shared = %d mmap_gpu=%d)\n", shared, mmap_gpu);
             if (retval = BaseDataSlice::Init(
                 num_gpus,
                 gpu_idx,
@@ -166,11 +215,42 @@ struct SSSPProblem : ProblemBase<VertexId, SizeT, Value,
                 skip_makeout_selection)) return retval;
 
             if (retval = distances   .Allocate(graph->nodes, util::DEVICE)) return retval;
-            if (retval = weights     .Allocate(graph->edges, util::DEVICE)) return retval;
+	
+            values_fname.assign(graph->f_in);
+            values_fname +=  ".val";
+			if (!mmap_gpu) {
+//UCM_DBG("calling allocate for weights \n");
+				if (retval = weights     .Allocate(graph->edges, util::DEVICE, shared)) return retval;
+				this->shared = shared;
+			} else {
+				UCM_DBG("Skipped allocate for weights. need to mmap it instead \n");
+
+				map_addr.map(values_fname.c_str(), 0, 0, true);
+//UCM_DBG("Setting weights.d_ptr=h+ptr = 0x%llx  size=%ld\n", map_addr.get_addr(), map_addr.map_len);
+				//weights.SetPointer((Value*)(map_addr.get_addr()), map_addr.map_len, util::DEVICE, true);
+				if (retval = weights     .Allocate_mapped(map_addr.map_len, (Value*)map_addr.get_addr())) return retval;
+				//weights.SetPointer((Value*)(map_addr.get_addr()), util::HOST);
+				printf("\n\ntest 0x%lx:   \n", weights.GetPointer(util::DEVICE));
+				this->mmaped = true;
+			}
             if (retval = this->labels.Allocate(graph->nodes, util::DEVICE)) return retval;
 
-            weights.SetPointer(graph->edge_values, graph->edges, util::HOST);
-            if (retval = weights.Move(util::HOST, util::DEVICE)) return retval;
+            if (!mmap_gpu)
+            	weights.SetPointer(graph->edge_values, graph->edges, util::HOST);
+
+            this->edges = graph->edges;
+//printf("\n\nIniitalized fname to %s\n\n", values_fname.c_str());
+            //If shared then I need to fill it in from file
+            if (shared) {
+            	values_fname.assign(graph->f_in);
+            	values_fname +=  ".val";
+//UCM_DBG("Instead of Move to device, read into shared memory from file %s into 0x%llx size = %ld\n", values_fname.c_str(), weights.GetPointer(util::DEVICE), graph->edges * sizeof(Value));
+				std::ifstream input(values_fname);
+				input.read(reinterpret_cast<char*>(weights.GetPointer(util::DEVICE)), graph->edges * sizeof(Value));
+				printf("\n\ntest 0x%lx: %d  \n", weights.GetPointer(util::DEVICE), *(int*)weights.GetPointer(util::DEVICE));
+            } else if (!mmap_gpu) {
+            	if (retval = weights.Move(util::HOST, util::DEVICE)) return retval;
+            }             	//UCM_DBG(" skipping move&read since weights is mmaped_gpu\n");
 
 
             if (MARK_PATHS)
@@ -336,6 +416,40 @@ struct SSSPProblem : ProblemBase<VertexId, SizeT, Value,
                 util::InvalidValue<VertexId>(),
                 nodes);
 
+//UCM_DBG("Need to reset weight here\n");
+#if 1
+    stopwatch swreset;
+//    printf("\n\n resding from %s \n\n", this->values_fname.c_str());
+    stopwatch_start(&swreset);
+//If shared then I need to fill it in from file
+if (this->shared) {
+//	UCM_DBG("Reading from file again\n");
+	std::ifstream input(this->values_fname);
+	input.read(reinterpret_cast<char*>(weights.GetPointer(util::DEVICE)),  this->edges * sizeof(Value));
+} else if (this->mmaped) {
+//	UCM_DBG(" Neet to invalidate cached data == aquire\n");
+	//unsigned long start, size_t len, int flags)
+	//(void)syscall(327, weights.GetPointer(util::DEVICE), this->edges * sizeof(Value), 0);
+#define ACQUIRE		0x100000
+#define MAP_ON_GPU	0x80000
+	//mmap(weights.GetPointer(util::DEVICE), this->edges * sizeof(Value), 0, ACQUIRE | MAP_ON_GPU, 0, 0);
+	printf("\n\maquire for 0x%lx: %d \n", weights.GetPointer(util::DEVICE),
+			syscall(327, weights.GetPointer(util::DEVICE), this->edges * sizeof(Value), 0x10));
+} else {
+//	UCM_DBG( "HOW do I reset for CUDA???\n");
+//	graph.read_edge_values
+//	UCM_DBG("Reading from file again and cudamecpy to dev\n");
+	std::ifstream input(this->values_fname);
+	input.read(reinterpret_cast<char*>(weights.GetPointer(util::HOST)),  this->edges * sizeof(Value));
+	if (retval = weights.Move(util::HOST, util::DEVICE)) return retval;
+}
+	stopwatch_stop(&swreset);
+	/*
+	 * I'm not measuring the duration of maquire because its too long due to my hack in NVIDIA - copy to host on invalidate.
+	 * But taking it as 3ms to be fare
+	 */
+    printf("Reset_timing,%lf,ms\n", (this->mmaped ? 3 : 1000*get_interval_by_sec(&swreset)));
+#endif
             //util::MemsetKernel<<<128, 128>>>(this->visit_lookup.GetPointer(util::DEVICE), (VertexId)-1, nodes);
             //util::MemsetKernel<<<128, 128>>>(sssp_marker.GetPointer(util::DEVICE), (int)0, nodes);
             return retval;
@@ -490,9 +604,12 @@ struct SSSPProblem : ProblemBase<VertexId, SizeT, Value,
             float         queue_sizing      = 2.0,
             float         in_sizing         = 1.0,
             float         partition_factor  = -1.0,
-            int           partition_seed    = -1)
+            int           partition_seed    = -1,
+            bool 	  shared =  false,
+            bool		mmap_gpu = false)
     {
         cudaError_t retval = cudaSuccess;
+//UCM_DBG("enter with shared = %d mmap_gpu = %d\n", shared, mmap_gpu);
         if (retval = BaseProblem::Init(
             stream_from_host,
             graph,
@@ -516,7 +633,7 @@ struct SSSPProblem : ProblemBase<VertexId, SizeT, Value,
             if (retval = data_slices[gpu].Allocate(1, util::DEVICE | util::HOST)) return retval;
             DataSlice* _data_slice = data_slices[gpu].GetPointer(util::HOST);
             _data_slice->streams.SetPointer(&streams[gpu*num_gpus*2], num_gpus*2);
-
+//UCM_DBG("calling _data_slice->Init() \n");
             if (retval = _data_slice->Init(
                 this->num_gpus,
                 this->gpu_idx[gpu],
@@ -532,7 +649,8 @@ struct SSSPProblem : ProblemBase<VertexId, SizeT, Value,
                 queue_sizing,
                 in_sizing,
                 this -> skip_makeout_selection,
-                this -> keep_node_num))
+                this -> keep_node_num,
+                shared, mmap_gpu))
                 return retval;
         } // end for (gpu)
 

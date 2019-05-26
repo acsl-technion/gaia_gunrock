@@ -209,7 +209,8 @@ int ReadMarketStream(
     time_t mark0 = time(NULL);
     if (!quiet)
     {
-        printf("  Parsing MARKET COO format");
+        printf("  Parsing MARKET COO format: LOAD_VALUES= %d undirected = %d reversed= %d output_file = %s\n",
+		(LOAD_VALUES ? 1 : 0), (undirected ? 1 : 0), (reversed ? 1: 0), output_file );
     }
     fflush(stdout);
 
@@ -487,12 +488,13 @@ int ReadCsrArrays_SM(char *f_in, char *f_label, Csr<VertexId, SizeT, Value> &csr
  * @param[in] csr_graph     Csr graph object to store the graph data.
  * @param[in] undirected    Is the graph undirected or not?
  * @param[in] reversed      Whether or not the graph is inversed.
+ * @param[in] shared_mem	Use NVIDIA UVM
  */
 template <bool LOAD_VALUES, typename VertexId, typename SizeT, typename Value>
 int ReadCsrArrays(char *f_in, Csr<VertexId, SizeT, Value> &csr_graph,
-                  bool undirected, bool reversed, bool quiet)
+                  bool undirected, bool reversed, bool quiet, bool shared_mem = false)
 {
-    csr_graph.template FromCsr<LOAD_VALUES>(f_in, quiet);
+    csr_graph.template FromCsr<LOAD_VALUES>(f_in, quiet, shared_mem);
     return 0;
 }
 
@@ -522,14 +524,17 @@ int BuildMarketGraph(
     Csr<VertexId, SizeT, Value> &csr_graph,
     bool undirected,
     bool reversed,
-    bool quiet = false)
+    bool quiet = false,
+    bool shared_mem = false,
+    bool mmap_gpu = false)
 {
     FILE *_file = fopen(output_file, "r");
     if (_file)
     {
         fclose(_file);
+UCM_DBG("got outputfile = %s, reading from it shared_mem = %d mmap_gpu = %d\n", output_file, shared_mem, mmap_gpu);
         if (ReadCsrArrays<LOAD_VALUES>(
-                    output_file, csr_graph, undirected, reversed, quiet) != 0)
+                    output_file, csr_graph, undirected, reversed, quiet, shared_mem) != 0)
         {
             return -1;
         }
@@ -575,6 +580,12 @@ int BuildMarketGraph(
             }
         }
     }
+
+UCM_DBG("done loading csr graph:\n");
+    csr_graph.DisplayGraph(true);
+
+    printf("\n\n");
+
     return 0;
 }
 
@@ -765,7 +776,9 @@ int BuildMarketGraph(
     Csr<VertexId, SizeT, Value> &graph,
     bool undirected,
     bool reversed,
-    bool quiet = false)
+    bool quiet = false,
+    bool shared_mem = false,
+    bool mmap_gpu = false)
 {
     // seperate the graph path and the file name
     char *temp1 = strdup(file_in);
@@ -780,8 +793,11 @@ int BuildMarketGraph(
             ((sizeof(VertexId) == 8) ? "64bVe." : ""), 
             ((sizeof(Value   ) == 8) ? "64bVa." : ""), 
             ((sizeof(SizeT   ) == 8) ? "64bSi." : ""));
+
+UCM_DBG(" undirected graph: ud = %s\n", ud);
+
         if (BuildMarketGraph<LOAD_VALUES>(file_in, ud, graph,
-                    true, false, quiet) != 0)
+                    true, false, quiet, shared_mem, mmap_gpu) != 0)
             return 1;
     }
     else if (!undirected && reversed)
@@ -792,7 +808,7 @@ int BuildMarketGraph(
             ((sizeof(Value   ) == 8) ? "64bVa." : ""), 
             ((sizeof(SizeT   ) == 8) ? "64bSi." : ""));
         if (BuildMarketGraph<LOAD_VALUES>(file_in, rv, graph,
-                    false, true, quiet) != 0)
+                    false, true, quiet, shared_mem, mmap_gpu) != 0)
             return 1;
     }
     else if (!undirected && !reversed)
@@ -803,7 +819,7 @@ int BuildMarketGraph(
             ((sizeof(Value   ) == 8) ? "64bVa." : ""), 
             ((sizeof(SizeT   ) == 8) ? "64bSi." : ""));
         if (BuildMarketGraph<LOAD_VALUES>(file_in, di, graph,
-                    false, false, quiet) != 0)
+                    false, false, quiet, shared_mem, mmap_gpu) != 0)
             return 1;
     }
     else

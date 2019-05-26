@@ -784,7 +784,7 @@ struct DataSliceBase
 
         // Set device by index
         if (retval = util::SetDevice(gpu_idx))  return retval;
-
+//UCM_DBG("enter\n");
         // Allocate frontiers and scanned_edges
         this->frontier_queues      = new util::DoubleBuffer<VertexId, SizeT, Value>[num_gpus + 1];
         this->scanned_edges        = new util::Array1D<SizeT, SizeT>[num_gpus + 1];
@@ -1617,6 +1617,7 @@ struct ProblemBase
         this->num_gpus          = num_gpus;
         this->gpu_idx           = new int [num_gpus];
         bool have_inv_graph     = false;
+//UCM_DBG("enter\n");
         if (num_gpus == 1 && gpu_idx == NULL)
         {
             if (retval = util::GRError(cudaGetDevice(&(this->gpu_idx[0])),

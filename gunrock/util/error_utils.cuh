@@ -26,6 +26,22 @@ enum gunrockError {
 
 typedef enum gunrockError gunrockError_t;
 
+
+#define UCM_PRINT_FUNC_PREFIX(fmt, ...)	\
+	printf("%s:%u %s(): " fmt,	\
+	__FILE__,		\
+	__LINE__,			\
+	__FUNCTION__,			\
+	##__VA_ARGS__)
+
+#if 1
+#define UCM_DBG(fmt, ...)	\
+	UCM_PRINT_FUNC_PREFIX("UCM-DBG " fmt, ##__VA_ARGS__)
+#else
+#define UCM_DBG(fmt, ...)	do { } while(0)
+#endif
+
+
 /**
  * Displays error message in accordance with debug mode
  */

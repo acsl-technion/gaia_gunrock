@@ -67,6 +67,12 @@ public:
     void         *context;  // pointer to context array used by MordernGPU
     cudaStream_t *streams;  // pointer to array of GPU streams
 
+    bool			shared_mem;
+    bool			mmap_gpu;
+    bool			producer;
+    int				percent;
+    int			flush;
+
     /**
      * @brief Info default constructor
      */
@@ -91,7 +97,7 @@ public:
         info["write_time"]         = 0.0f;   // output writing time
         info["output_filename"]    = "";     // output filename
         info["engine"]             = "";     // engine name - Gunrock
-        info["edge_value"]         = false;  // default don't load weights
+        info["edge_value"]         = true;  // default don't load weights
         info["random_edge_value"]  = false;  // whether to generate edge weights
         info["git_commit_sha1"]    = "";     // git commit sha1
         info["graph_type"]         = "";     // input graph type
@@ -155,6 +161,12 @@ public:
         info["64bit_VertexId"     ]= (sizeof(VertexId) == 8) ? true : false;
         info["64bit_SizeT"        ]= (sizeof(SizeT   ) == 8) ? true : false;
         info["64bit_Value"        ]= (sizeof(Value   ) == 8) ? true : false;
+
+        shared_mem = false;
+        mmap_gpu = false;
+        producer = false;
+        percent = 50;
+        flush = 0;
         // info["gpuinfo"]
         // info["device_list"]
         // info["sysinfo"]
@@ -511,6 +523,7 @@ public:
         // load or generate input graph
         if (info["edge_value"].get_bool() && !info["random_edge_value"].get_bool())
         {
+UCM_DBG("load graph with weighs!\n");
             LoadGraph<true, false>(args, csr_ref);  // load graph with weighs
         }
         else
@@ -534,6 +547,21 @@ public:
         info["stddev_degrees"] = (float)csr_ref.GetStddevDegree();
         info["num_vertices"] = (int64_t)csr_ref.nodes;
         info["num_edges"   ] = (int64_t)csr_ref.edges;
+
+        shared_mem = (args.CheckCmdLineFlag("shared_mem") ? true : false);
+        mmap_gpu = (args.CheckCmdLineFlag("mmap_gpu") ? true : false);
+        producer = (args.CheckCmdLineFlag("producer") ? true : false);
+        if (args.CheckCmdLineFlag("percent")) {
+			args.GetCmdLineArgument("flush", flush);
+		}
+        if (args.CheckCmdLineFlag("percent")) {
+			args.GetCmdLineArgument("percent", percent);
+		}
+
+        if (shared_mem && mmap_gpu) {
+        	 printf("\n\n%s : %d:  ERROR:can's set both shared_mem and mmap_gpu\n", __FILE__, __LINE__);
+        	 shared_mem = mmap_gpu = false;
+        }
     }
 
     /**
@@ -856,6 +884,7 @@ public:
             }
 
             char *market_filename = args.GetCmdLineArgvDataset();
+UCM_DBG("filename = %s shared = %d mmap_gpu = %d\n", market_filename, this->shared_mem, this->mmap_gpu);
 
             std::ifstream fp(market_filename);
             if (market_filename == NULL||!fp.is_open())
@@ -871,7 +900,9 @@ public:
                         csr_ref,
                         info["undirected"].get_bool(),
                         INVERSE_GRAPH,
-                        args.CheckCmdLineFlag("quiet")) != 0)
+                        args.CheckCmdLineFlag("quiet"),
+                        this->shared_mem,
+                        this->mmap_gpu) != 0)
             {
                 return 1;
             }

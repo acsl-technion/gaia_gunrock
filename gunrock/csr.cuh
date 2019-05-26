@@ -62,6 +62,8 @@ struct Csr
 
     bool  pinned;  // Whether to use pinned memory
 
+    std::string f_in;
+
     /**
      * @brief CSR Constructor
      *
@@ -110,6 +112,7 @@ struct Csr
         {
             edge_values = NULL;
         } else {
+UCM_DBG("initializing edge_values with memcpy\n");
             edge_values = (Value*) malloc(sizeof(Value) * source.edges);
             memcpy(edge_values, source.edge_values, sizeof(Value) * source.edges);
         }
@@ -214,6 +217,7 @@ struct Csr
                           (Value*) malloc(sizeof(Value) * nodes) : NULL;
             edge_values = (LOAD_EDGE_VALUES) ?
                           (Value*) malloc(sizeof(Value) * edges) : NULL;
+UCM_DBG("Allocated edge_values\n");
         }
     }
 
@@ -252,16 +256,27 @@ struct Csr
         std::ofstream fout(file_name);
         if (fout.is_open())
         {
+UCM_DBG("Writing out file %s\n", file_name);
             fout.write(reinterpret_cast<const char*>(&v), sizeof(SizeT));
             fout.write(reinterpret_cast<const char*>(&e), sizeof(SizeT));
             fout.write(reinterpret_cast<const char*>(row), (v + 1)*sizeof(SizeT));
             fout.write(reinterpret_cast<const char*>(col), e * sizeof(VertexId));
+            fout.close();
             if (edge_values != NULL)
             {
-                fout.write(reinterpret_cast<const char*>(edge_values),
+            	std::string values_fname = (file_name);
+            	values_fname += ".val";
+UCM_DBG("Writing out to %s\n", values_fname.c_str());
+            	std::ofstream fout_values(values_fname);
+            	if (!fout_values.is_open()) {
+            		printf("\n\nERROR: cant open file\n");
+            		return;
+            	}
+            	fout_values.write(reinterpret_cast<const char*>(edge_values),
                            e * sizeof(Value));
+            	fout_values.close();
             }
-            fout.close();
+            //fout.close();
         }
     }
 
@@ -311,6 +326,7 @@ struct Csr
             std::ofstream vals_output(vals);
             if (vals_output.is_open())
             {
+ UCM_DBG("strange copy for edge_values\n");
                 std::copy(edge_values, edge_values + e,
                           std::ostream_iterator<Value>(vals_output, "\n"));
                 vals_output.close();
@@ -401,6 +417,15 @@ struct Csr
     }
 
 
+    void read_edge_values()
+    {
+    	std::string values_fname = this->f_in +  ".val";
+		std::ifstream input_val(values_fname);
+		UCM_DBG("Reading edge_values from file %s, size = %ld\n",
+				values_fname.c_str(), this->edges * sizeof(Value));
+
+		input_val.read(reinterpret_cast<char*>(this->edge_values), this->edges * sizeof(Value));
+    }
     /**
      * @brief Read from stored row_offsets, column_indices arrays.
      *
@@ -410,13 +435,15 @@ struct Csr
      * @param[in] quiet Don't print out anything.
      */
     template <bool LOAD_EDGE_VALUES>
-    void FromCsr(char *f_in, bool quiet = false)
+    void FromCsr(char *f_in, bool quiet = false, bool shared_mem = false, bool mmap_gpu = false)
     {
         if (!quiet)
         {
             printf("  Reading directly from stored binary CSR arrays ...\n");
         }
         time_t mark1 = time(NULL);
+		this->f_in.assign(f_in);
+UCM_DBG("Enter shared_mem = %d mmap_gpu = %d f_in = %s\n", shared_mem, mmap_gpu, this->f_in.c_str());
 
         std::ifstream input(f_in);
         SizeT v, e;
@@ -424,12 +451,15 @@ struct Csr
         input.read(reinterpret_cast<char*>(&e), sizeof(SizeT));
 
         FromScratch<LOAD_EDGE_VALUES, false>(v, e);
-
         input.read(reinterpret_cast<char*>(row_offsets), (v + 1)*sizeof(SizeT));
         input.read(reinterpret_cast<char*>(column_indices), e * sizeof(VertexId));
-        if (LOAD_EDGE_VALUES)
+        if (LOAD_EDGE_VALUES )
         {
-            input.read(reinterpret_cast<char*>(edge_values), e * sizeof(Value));
+        	if (shared_mem || mmap_gpu) {
+        		UCM_DBG("Skipping reading from file for edge_values because of shared mem or mmap_gpu\n");
+        	} else {
+        		read_edge_values();
+        	}
         }
 
         time_t mark2 = time(NULL);
@@ -478,7 +508,6 @@ struct Csr
         input.read(reinterpret_cast<char*>(&e), sizeof(SizeT));
 
         FromScratch<false, LOAD_NODE_VALUES>(v, e);
-
         input.read(reinterpret_cast<char*>(row_offsets), (v + 1)*sizeof(SizeT));
         input.read(reinterpret_cast<char*>(column_indices), e * sizeof(VertexId));
         if (LOAD_NODE_VALUES)
@@ -545,9 +574,9 @@ struct Csr
         if (!quiet)
         {
             printf("  Converting %lld vertices, %lld directed edges (%s tuples) "
-                   "to CSR format...\n", 
+                   "to CSR format... LOAD_EDGE_VALUES = %d\n", 
                     (long long)coo_nodes, (long long)coo_edges,
-                   ordered_rows ? "ordered" : "unordered");
+                   ordered_rows ? "ordered" : "unordered", (LOAD_EDGE_VALUES ? 1 : 0));
         }
 
         time_t mark1 = time(NULL);
@@ -627,6 +656,7 @@ struct Csr
                 if (LOAD_EDGE_VALUES)
                 {
                     //new_coo[edge].Val(edge_values[edge]);
+//UCM_DBG("setting  edge_values[%d] = %d\n", edge + edge_offset, new_coo[edge].val);
                     edge_values[edge + edge_offset] = new_coo[edge].val;
                 }
             }

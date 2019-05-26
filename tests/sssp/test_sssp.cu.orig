@@ -299,39 +299,47 @@ long get_random_number(int min, long max)
 }
 
 template <typename SizeT, typename Value>
-void producer(int *req_pending, pthread_mutex_t *mutex, int ittr, std::string fname, SizeT edges, int persent_to_update)
+void producer(int *req_pending, pthread_mutex_t *mutex, int test_duration_sec, std::string fname, SizeT edges, int persent_to_update)
 {
 	std::string tmp(fname + ".val");
 	fileMapping<char> map_addr(tmp.c_str());
-	int i;
+	int iter = 0;
 	//map_addr.map(fname, 0, 0, false) ;
 	Value    *edge_values = (Value *)map_addr.get_addr();
-	UCM_DBG("Mapped file %s on cpu for size %ld edges = %d\n", tmp.c_str(), map_addr.map_len, edges);
+	UCM_DBG("\n\nMapped file %s on cpu for size %ld edges = %d\n", tmp.c_str(), map_addr.map_len, edges);
 
+	//long int num_updates = (edges / 100) * persent_to_update ;
 	int num_updates = map_addr.map_len / (64*1024) ; //=number of gpu pages holding the file
 	num_updates = num_updates * persent_to_update / 100;
 	if (!num_updates) num_updates = 1;
-	for (i = 0; i < ittr; i++) {
-		UCM_DBG("PRODUCER: Will make %ld updates (== %ld %) fsize=%ld bytes (= %d gpu pages)\n", num_updates, persent_to_update, map_addr.map_len,
-				map_addr.map_len/(64*1024));
-		while (*req_pending > 0);
-		for (int upd = 0; upd < num_updates; upd++) {
-			long int gpu_page = upd;//get_random_number(0, map_addr.map_len / (64*1024));
-			int value = get_random_number(0, 2048);
-//			UCM_DBG("PRODUCER: will update at offse t %d, value = %d req_pending=%d\n", offset, value, *req_pending);
 
-		//	sleep(get_random_number(1,3));
-		//	UCM_DBG("PRODUCER: done sleeping\n");
+UCM_DBG("PRODUCER: Will make %ld (=%d percent) updates , fsize=%ld bytes (= %d gpu pages)\n", num_updates, persent_to_update,  map_addr.map_len,
+		map_addr.map_len/(64*1024));
+	//for (i = 0; i < ittr; i++) {
+
+	CpuTimer ctest_duration;
+	ctest_duration.Start();
+	while (ctest_duration.MillisSinceStart() < test_duration_sec * 1000) {
+		for (int upd = 0; upd < num_updates; upd++) {
+			long int gpu_page = get_random_number(0, map_addr.map_len / (64*1024));
+			int value = get_random_number(0, 2048);
 			edge_values[gpu_page * 64 * 1024/ sizeof(int) + 1] = value;
+			//UCM_DBG("PRODUCER:  updated at offse t %d, value = %d req_pending=%d\n", gpu_page * 64 * 1024/ sizeof(int) + 1, value, *req_pending);
 		}
+<<<<<<< HEAD
+		iter++;
+=======
 		map_addr.sync();
 		pthread_mutex_lock(mutex);
 		(*req_pending)+= 10;
-	printf("PRODUCER: updated %d gpu pages\n", num_updates);
+		printf("PRODUCER: prodused (i = %d)\n", i);
 		pthread_mutex_unlock(mutex);
 		sleep(get_random_number(3,6));
+>>>>>>> 8a50750... some more prints & sync after updating by producer
 	}
-	UCM_DBG("PRODUCER: exiting i =%d\n", i);
+//	ctest_duration.Stop();
+	printf("%%%%%%%%%%%%%%%%%%%%%%%%%%% \n PRODUCER: Done: test duration = %ld [sec],  itter = %d\n",  ctest_duration.MillisSinceStart() / 1000, iter);
+
 	exit(0);
 }
 
@@ -491,6 +499,8 @@ cudaError_t RunTests(Info<VertexId, SizeT, Value> *info)
    // pid_t pid;
     int *req_pending;
     std::thread *t1;
+
+    CpuTimer test_duration;
     if (info->producer) {
 		UCM_DBG("Initialize and start Producer thread\n");
 		pthread_mutexattr_init(&attributes);
@@ -512,17 +522,30 @@ cudaError_t RunTests(Info<VertexId, SizeT, Value> *info)
 	//	printf("\n\nDBG: req_pending=0x%llx, mutex = 0x%llx\n\n", req_pending, mutex );
 		t1 = new std::thread(producer<SizeT, Value>, req_pending, mutex, iterations, graph->f_in, graph->edges, info->percent);
     }
-    for (int iter = 0; iter < iterations; ++iter)
+
+    test_duration.Start();
+    int iter = 0;
+    //for (int iter = 0; iter < iterations; ++iter)
+    while (test_duration.MillisSinceStart() / 1000 < iterations)
     {
     	//std::string input = "";
     	//getline(std::cin, input);
-    	if  (info->producer) {
+//    	if  (info->producer) {
     		//wait for producer
     	//	UCM_DBG("CONSUMER: waiting on count\n");
-    		while (*req_pending == 0);
+<<<<<<< HEAD
+ //   		while (*req_pending == 0);
     	//	UCM_DBG("CONSUMER: waiting on count done\n");
+   // 		sleep(5);
+   // 	}
+    	sleep(50);
+=======
+    		while (*req_pending == 0);
+    		UCM_DBG("CONSUMER: waiting on count done %d\n",*req_pending);
+    	//	char ch = getchar();
     		sleep(5);
     	}
+>>>>>>> 8a50750... some more prints & sync after updating by producer
         if (!quiet_mode)
         {
             printf("__________________________\n"); fflush(stdout);
@@ -653,6 +676,7 @@ cudaError_t RunTests(Info<VertexId, SizeT, Value> *info)
         info->ComputeTraversalStats(  // compute running statistics
             enactor->enactor_stats.GetPointer(), total_elapsed, h_labels);
 #endif
+#if 0
         if (info->producer) {
         	//signal producer that I'm done processsing
         	pthread_mutex_lock(mutex);
@@ -664,7 +688,12 @@ cudaError_t RunTests(Info<VertexId, SizeT, Value> *info)
 			//printf("Child process increased the count to %d\n", *count);
 			pthread_mutex_unlock(mutex);
         }
+#endif
+        iter++;
     }
+
+    test_duration.Stop();
+    printf("%%%%%%%%%%%%%%%%%%%%%%%%%%% \n CONSUMER Done: test duration = %ld [sec], itter = %d\n", test_duration.ElapsedMillis(), iter);
     total_elapsed /= iterations;
     info -> info["process_times"] = process_times;
     info -> info["min_process_time"] = min_elapsed;
