@@ -27,6 +27,8 @@ bin/
 
 # Ignore eval directory
 eval/
+Debug/
+dataset/
 
 # Ignore doc generated files
 doc/warn.log
