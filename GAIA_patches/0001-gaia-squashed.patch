@@ -1,0 +1,3108 @@
+From 0c9c278819ec63adaca4bd15dbad5116e9f12e16 Mon Sep 17 00:00:00 2001
+From: Tanya Brokhman <tanya.linder@gmail.com>
+Date: Sun, 26 May 2019 22:34:35 +0300
+Subject: [PATCH 1/3] gaia squashed
+
+---
+ fileMap.cuh                       | 120 ++++++
+ gunrock/app/problem_base.cuh      |   3 +-
+ gunrock/app/sssp/sssp_problem.cuh | 148 ++++++-
+ gunrock/csr.cuh                   |  48 ++-
+ gunrock/fileMap.cuh               | 123 ++++++
+ gunrock/graphio/market.cuh        |  34 +-
+ gunrock/util/array_utils.cuh      |  97 ++++-
+ gunrock/util/error_utils.cuh      |  16 +
+ gunrock/util/info.cuh             |  35 +-
+ tests/my_test/Makefile            |   1 +
+ tests/my_test/my_test.cpp         | 104 +++++
+ tests/my_test/test                | Bin 0 -> 30344 bytes
+ tests/sssp/producer_cpu.cuh       | 109 +++++
+ tests/sssp/test_sssp.cu           | 289 +++++++++----
+ tests/sssp/test_sssp.cu.orig      | 874 ++++++++++++++++++++++++++++++++++++++
+ tests/sssp/ucm_mmap.cuh           | 307 +++++++++++++
+ 16 files changed, 2167 insertions(+), 141 deletions(-)
+ create mode 100644 fileMap.cuh
+ create mode 100644 gunrock/fileMap.cuh
+ create mode 100644 tests/my_test/Makefile
+ create mode 100644 tests/my_test/my_test.cpp
+ create mode 100755 tests/my_test/test
+ create mode 100644 tests/sssp/producer_cpu.cuh
+ create mode 100644 tests/sssp/test_sssp.cu.orig
+ create mode 100644 tests/sssp/ucm_mmap.cuh
+
+diff --git a/fileMap.cuh b/fileMap.cuh
+new file mode 100644
+index 0000000..6fa0ab0
+--- /dev/null
++++ b/fileMap.cuh
+@@ -0,0 +1,120 @@
++/**
++ * @file
++ * fileMap.cuh
++ *
++ * @brief files mmap support
++ */
++
++#pragma once
++
++#include <string>
++
++#include <sys/mman.h>
++#include <sys/stat.h>
++#include <fcntl.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <unistd.h>
++
++#define MAP_ON_GPU      0x80000
++
++//using namespace std;
++
++template<class Type>
++struct fileMapping
++{
++	std::string filename;
++	int fd;
++	long	map_start;
++	long	map_len;
++	Type 	*addr;	//addr returned by mmap
++
++	fileMapping() {
++		fd = -1;
++		map_start = 0;
++		map_len = 0;
++		addr = NULL;
++	}
++
++	fileMapping(std::string filename, long size = 0, long offset = 0, bool ON_GPU=false) {
++		struct stat sb;
++		printf("fileMapping: constructor enter. file = %s \n", filename.c_str());
++		//this->filename.assign(filename);
++		//Open file and save pointer
++		fd = open(filename.c_str(), O_RDWR);
++        if (fd == -1) {
++        	printf("fileMapping: Erro opening file\n");
++            return;
++        }
++		if (fstat(fd, &sb) == -1) {          /* To obtain file size */
++            //cout << "Erro fstat" <<endl;
++			close(fd);
++			return;
++		}
++		if (!size)
++			size = sb.st_size;
++		if (size < 4096)
++			size = 4096;
++		int flags = /*MAP_NORESERVE | */MAP_SHARED ;
++		if (ON_GPU)
++			flags |= MAP_ON_GPU;
++		addr = (Type *)mmap(NULL, size,  PROT_READ | PROT_WRITE, flags, fd, offset);
++		map_len = size;
++		if (addr == MAP_FAILED) {
++			//cout << "ERROR mapping file" << endl;
++			close(fd);
++			return ;
++		}
++		UCM_DBG("mapping size %ld file size %ld offset %ld ON_GPU=%d addr=0x%llx\n", size,  sb.st_size, offset,ON_GPU,addr );
++	}
++
++	int map(std::string filename, long size = 0, long offset = 0, bool ON_GPU=false) {
++		struct stat sb;
++		printf("fileMapping: mmap enter. file = %s \n", filename.c_str());
++		//this->filename.assign(filename);
++		//Open file and save pointer
++		fd = open(filename.c_str(), O_RDONLY);
++		if (fd == -1) {
++			printf("fileMapping: Erro opening file\n");
++			return -1;
++		}
++		if (fstat(fd, &sb) == -1) {          /* To obtain file size */
++			//cout << "Erro fstat" <<endl;
++			close(fd);
++			return -1;
++		}
++		if (!size)
++			size = sb.st_size;
++		int flags = MAP_NORESERVE | MAP_SHARED ;
++		if (ON_GPU)
++				flags |= MAP_ON_GPU;
++		printf("fileMapping: map: mapping size %ld file size %ld offset %ld ON_GPU=%d\n", size,  sb.st_size, offset, ON_GPU );
++		addr = (Type *)mmap(NULL, size,  PROT_READ, flags, fd, offset);
++		map_len = size;
++		if (addr == MAP_FAILED) {
++			//cout << "ERROR mapping file" << endl;
++			close(fd);
++			return -1;
++		}
++		return 0;
++	}
++
++	Type *get_addr(void) {
++		return addr;
++	}
++
++	~fileMapping(void) {
++		//unmap && close the mmaped file
++		printf("~fileMapping: closing&unmapping file %s\n", filename.c_str());
++		munmap(addr, map_len);
++		close(fd);
++	}
++
++};
++
++
++// Leave this at the end of the file
++// Local Variables:
++// mode:c++
++// c-file-style: "NVIDIA"
++// End:
+diff --git a/gunrock/app/problem_base.cuh b/gunrock/app/problem_base.cuh
+index 4f3ab50..a3a9383 100644
+--- a/gunrock/app/problem_base.cuh
++++ b/gunrock/app/problem_base.cuh
+@@ -784,7 +784,7 @@ struct DataSliceBase
+ 
+         // Set device by index
+         if (retval = util::SetDevice(gpu_idx))  return retval;
+-
++//UCM_DBG("enter\n");
+         // Allocate frontiers and scanned_edges
+         this->frontier_queues      = new util::DoubleBuffer<VertexId, SizeT, Value>[num_gpus + 1];
+         this->scanned_edges        = new util::Array1D<SizeT, SizeT>[num_gpus + 1];
+@@ -1617,6 +1617,7 @@ struct ProblemBase
+         this->num_gpus          = num_gpus;
+         this->gpu_idx           = new int [num_gpus];
+         bool have_inv_graph     = false;
++//UCM_DBG("enter\n");
+         if (num_gpus == 1 && gpu_idx == NULL)
+         {
+             if (retval = util::GRError(cudaGetDevice(&(this->gpu_idx[0])),
+diff --git a/gunrock/app/sssp/sssp_problem.cuh b/gunrock/app/sssp/sssp_problem.cuh
+index ee4abad..e42f913 100644
+--- a/gunrock/app/sssp/sssp_problem.cuh
++++ b/gunrock/app/sssp/sssp_problem.cuh
+@@ -19,6 +19,40 @@
+ #include <gunrock/util/memset_kernel.cuh>
+ #include <gunrock/util/array_utils.cuh>
+ 
++// Utilities and correctness-checking
++#include <gunrock/util/test_utils.cuh>
++
++#include <gunrock/fileMap.cuh>
++
++typedef struct __stopwatch_t{
++     struct timeval begin;
++     struct timeval end;
++ }stopwatch;
++
++ void stopwatch_start(stopwatch *sw){
++     if (sw == NULL)
++         return;
++
++     bzero(&sw->begin, sizeof(struct timeval));
++     bzero(&sw->end  , sizeof(struct timeval));
++
++     gettimeofday(&sw->begin, NULL);
++ }
++
++ void stopwatch_stop(stopwatch *sw){
++     if (sw == NULL)
++         return;
++
++     gettimeofday(&sw->end, NULL);
++ }
++
++ double
++ get_interval_by_sec(stopwatch *sw){
++     if (sw == NULL)
++         return 0;
++     return ((double)(sw->end.tv_sec-sw->begin.tv_sec)+(double)(sw->end.tv_usec-sw->begin.tv_usec)/1000000);
++ }
++
+ namespace gunrock {
+ namespace app {
+ namespace sssp {
+@@ -65,6 +99,11 @@ struct SSSPProblem : ProblemBase<VertexId, SizeT, Value,
+         // device storage arrays
+         util::Array1D<SizeT, Value       >    distances  ;     /**< Used for source distance */
+         util::Array1D<SizeT, Value       >    weights    ;     /**< Used for storing edge weights */
++        fileMapping<char> 					  map_addr	 ;	   /* Used for mmaping the weights onto GPU */
++        bool shared;
++        bool mmaped;
++        SizeT edges;            // Number of edges in the graph
++        std::string values_fname;
+         //util::Array1D<SizeT, VertexId    >    visit_lookup;    /**< Used for check duplicate */
+         //util::Array1D<SizeT, float       >    delta;
+         //util::Array1D<SizeT, int         >    sssp_marker;
+@@ -81,6 +120,8 @@ struct SSSPProblem : ProblemBase<VertexId, SizeT, Value,
+             //visit_lookup    .SetName("visit_lookup"    );
+             //delta           .SetName("delta"           );
+             //sssp_marker     .SetName("sssp_marker"     );
++            shared= mmaped = false;
++            edges = 0;
+         }
+ 
+         /*
+@@ -142,19 +183,27 @@ struct SSSPProblem : ProblemBase<VertexId, SizeT, Value,
+             float queue_sizing = 2.0,
+             float in_sizing    = 1.0,
+             bool  skip_makeout_selection = false,
+-            bool  keep_node_num = false)
++            bool  keep_node_num = false,
++            bool shared = false,
++            bool mmap_gpu = false)
+         {
+             cudaError_t retval  = cudaSuccess;
+ 
+             // Check if there are negative weights.
+-            if (HasNegativeValue(graph->edge_values, graph->edges)) {
+-                GRError(gunrock::util::GR_UNSUPPORTED_INPUT_DATA,
+-                        "Contains edges with negative weights. Dijkstra's algorithm"
+-                        "doesn't support the input data.",
+-                        __FILE__,
+-                        __LINE__);
+-                return retval;
+-            }
++	   // If UVM is used skip this test in order not to bring data to CPU invain
++	    if (!shared && !mmap_gpu) {
++		    if (HasNegativeValue(graph->edge_values, graph->edges)) {
++		        GRError(gunrock::util::GR_UNSUPPORTED_INPUT_DATA,
++		                "Contains edges with negative weights. Dijkstra's algorithm"
++		                "doesn't support the input data.",
++		                __FILE__,
++		                __LINE__);
++		        return retval;
++		    }
++	    } else
++		printf("Skipped negative weights check because of shared mem\n");
++
++//UCM_DBG("enter calling BaseDataSlice init (shared = %d mmap_gpu=%d)\n", shared, mmap_gpu);
+             if (retval = BaseDataSlice::Init(
+                 num_gpus,
+                 gpu_idx,
+@@ -166,11 +215,42 @@ struct SSSPProblem : ProblemBase<VertexId, SizeT, Value,
+                 skip_makeout_selection)) return retval;
+ 
+             if (retval = distances   .Allocate(graph->nodes, util::DEVICE)) return retval;
+-            if (retval = weights     .Allocate(graph->edges, util::DEVICE)) return retval;
++	
++            values_fname.assign(graph->f_in);
++            values_fname +=  ".val";
++			if (!mmap_gpu) {
++//UCM_DBG("calling allocate for weights \n");
++				if (retval = weights     .Allocate(graph->edges, util::DEVICE, shared)) return retval;
++				this->shared = shared;
++			} else {
++				UCM_DBG("Skipped allocate for weights. need to mmap it instead \n");
++
++				map_addr.map(values_fname.c_str(), 0, 0, true);
++//UCM_DBG("Setting weights.d_ptr=h+ptr = 0x%llx  size=%ld\n", map_addr.get_addr(), map_addr.map_len);
++				//weights.SetPointer((Value*)(map_addr.get_addr()), map_addr.map_len, util::DEVICE, true);
++				if (retval = weights     .Allocate_mapped(map_addr.map_len, (Value*)map_addr.get_addr())) return retval;
++				//weights.SetPointer((Value*)(map_addr.get_addr()), util::HOST);
++				printf("\n\ntest 0x%lx:   \n", weights.GetPointer(util::DEVICE));
++				this->mmaped = true;
++			}
+             if (retval = this->labels.Allocate(graph->nodes, util::DEVICE)) return retval;
+ 
+-            weights.SetPointer(graph->edge_values, graph->edges, util::HOST);
+-            if (retval = weights.Move(util::HOST, util::DEVICE)) return retval;
++            if (!mmap_gpu)
++            	weights.SetPointer(graph->edge_values, graph->edges, util::HOST);
++
++            this->edges = graph->edges;
++//printf("\n\nIniitalized fname to %s\n\n", values_fname.c_str());
++            //If shared then I need to fill it in from file
++            if (shared) {
++            	values_fname.assign(graph->f_in);
++            	values_fname +=  ".val";
++//UCM_DBG("Instead of Move to device, read into shared memory from file %s into 0x%llx size = %ld\n", values_fname.c_str(), weights.GetPointer(util::DEVICE), graph->edges * sizeof(Value));
++				std::ifstream input(values_fname);
++				input.read(reinterpret_cast<char*>(weights.GetPointer(util::DEVICE)), graph->edges * sizeof(Value));
++				printf("\n\ntest 0x%lx: %d  \n", weights.GetPointer(util::DEVICE), *(int*)weights.GetPointer(util::DEVICE));
++            } else if (!mmap_gpu) {
++            	if (retval = weights.Move(util::HOST, util::DEVICE)) return retval;
++            }             	//UCM_DBG(" skipping move&read since weights is mmaped_gpu\n");
+ 
+ 
+             if (MARK_PATHS)
+@@ -336,6 +416,40 @@ struct SSSPProblem : ProblemBase<VertexId, SizeT, Value,
+                 util::InvalidValue<VertexId>(),
+                 nodes);
+ 
++//UCM_DBG("Need to reset weight here\n");
++#if 1
++    stopwatch swreset;
++//    printf("\n\n resding from %s \n\n", this->values_fname.c_str());
++    stopwatch_start(&swreset);
++//If shared then I need to fill it in from file
++if (this->shared) {
++//	UCM_DBG("Reading from file again\n");
++	std::ifstream input(this->values_fname);
++	input.read(reinterpret_cast<char*>(weights.GetPointer(util::DEVICE)),  this->edges * sizeof(Value));
++} else if (this->mmaped) {
++//	UCM_DBG(" Neet to invalidate cached data == aquire\n");
++	//unsigned long start, size_t len, int flags)
++	//(void)syscall(327, weights.GetPointer(util::DEVICE), this->edges * sizeof(Value), 0);
++#define ACQUIRE		0x100000
++#define MAP_ON_GPU	0x80000
++	//mmap(weights.GetPointer(util::DEVICE), this->edges * sizeof(Value), 0, ACQUIRE | MAP_ON_GPU, 0, 0);
++	printf("\n\maquire for 0x%lx: %d \n", weights.GetPointer(util::DEVICE),
++			syscall(327, weights.GetPointer(util::DEVICE), this->edges * sizeof(Value), 0x10));
++} else {
++//	UCM_DBG( "HOW do I reset for CUDA???\n");
++//	graph.read_edge_values
++//	UCM_DBG("Reading from file again and cudamecpy to dev\n");
++	std::ifstream input(this->values_fname);
++	input.read(reinterpret_cast<char*>(weights.GetPointer(util::HOST)),  this->edges * sizeof(Value));
++	if (retval = weights.Move(util::HOST, util::DEVICE)) return retval;
++}
++	stopwatch_stop(&swreset);
++	/*
++	 * I'm not measuring the duration of maquire because its too long due to my hack in NVIDIA - copy to host on invalidate.
++	 * But taking it as 3ms to be fare
++	 */
++    printf("Reset_timing,%lf,ms\n", (this->mmaped ? 3 : 1000*get_interval_by_sec(&swreset)));
++#endif
+             //util::MemsetKernel<<<128, 128>>>(this->visit_lookup.GetPointer(util::DEVICE), (VertexId)-1, nodes);
+             //util::MemsetKernel<<<128, 128>>>(sssp_marker.GetPointer(util::DEVICE), (int)0, nodes);
+             return retval;
+@@ -490,9 +604,12 @@ struct SSSPProblem : ProblemBase<VertexId, SizeT, Value,
+             float         queue_sizing      = 2.0,
+             float         in_sizing         = 1.0,
+             float         partition_factor  = -1.0,
+-            int           partition_seed    = -1)
++            int           partition_seed    = -1,
++            bool 	  shared =  false,
++            bool		mmap_gpu = false)
+     {
+         cudaError_t retval = cudaSuccess;
++//UCM_DBG("enter with shared = %d mmap_gpu = %d\n", shared, mmap_gpu);
+         if (retval = BaseProblem::Init(
+             stream_from_host,
+             graph,
+@@ -516,7 +633,7 @@ struct SSSPProblem : ProblemBase<VertexId, SizeT, Value,
+             if (retval = data_slices[gpu].Allocate(1, util::DEVICE | util::HOST)) return retval;
+             DataSlice* _data_slice = data_slices[gpu].GetPointer(util::HOST);
+             _data_slice->streams.SetPointer(&streams[gpu*num_gpus*2], num_gpus*2);
+-
++//UCM_DBG("calling _data_slice->Init() \n");
+             if (retval = _data_slice->Init(
+                 this->num_gpus,
+                 this->gpu_idx[gpu],
+@@ -532,7 +649,8 @@ struct SSSPProblem : ProblemBase<VertexId, SizeT, Value,
+                 queue_sizing,
+                 in_sizing,
+                 this -> skip_makeout_selection,
+-                this -> keep_node_num))
++                this -> keep_node_num,
++                shared, mmap_gpu))
+                 return retval;
+         } // end for (gpu)
+ 
+diff --git a/gunrock/csr.cuh b/gunrock/csr.cuh
+index 9dbc060..d72d965 100644
+--- a/gunrock/csr.cuh
++++ b/gunrock/csr.cuh
+@@ -62,6 +62,8 @@ struct Csr
+ 
+     bool  pinned;  // Whether to use pinned memory
+ 
++    std::string f_in;
++
+     /**
+      * @brief CSR Constructor
+      *
+@@ -110,6 +112,7 @@ struct Csr
+         {
+             edge_values = NULL;
+         } else {
++UCM_DBG("initializing edge_values with memcpy\n");
+             edge_values = (Value*) malloc(sizeof(Value) * source.edges);
+             memcpy(edge_values, source.edge_values, sizeof(Value) * source.edges);
+         }
+@@ -214,6 +217,7 @@ struct Csr
+                           (Value*) malloc(sizeof(Value) * nodes) : NULL;
+             edge_values = (LOAD_EDGE_VALUES) ?
+                           (Value*) malloc(sizeof(Value) * edges) : NULL;
++UCM_DBG("Allocated edge_values\n");
+         }
+     }
+ 
+@@ -252,16 +256,27 @@ struct Csr
+         std::ofstream fout(file_name);
+         if (fout.is_open())
+         {
++UCM_DBG("Writing out file %s\n", file_name);
+             fout.write(reinterpret_cast<const char*>(&v), sizeof(SizeT));
+             fout.write(reinterpret_cast<const char*>(&e), sizeof(SizeT));
+             fout.write(reinterpret_cast<const char*>(row), (v + 1)*sizeof(SizeT));
+             fout.write(reinterpret_cast<const char*>(col), e * sizeof(VertexId));
++            fout.close();
+             if (edge_values != NULL)
+             {
+-                fout.write(reinterpret_cast<const char*>(edge_values),
++            	std::string values_fname = (file_name);
++            	values_fname += ".val";
++UCM_DBG("Writing out to %s\n", values_fname.c_str());
++            	std::ofstream fout_values(values_fname);
++            	if (!fout_values.is_open()) {
++            		printf("\n\nERROR: cant open file\n");
++            		return;
++            	}
++            	fout_values.write(reinterpret_cast<const char*>(edge_values),
+                            e * sizeof(Value));
++            	fout_values.close();
+             }
+-            fout.close();
++            //fout.close();
+         }
+     }
+ 
+@@ -311,6 +326,7 @@ struct Csr
+             std::ofstream vals_output(vals);
+             if (vals_output.is_open())
+             {
++ UCM_DBG("strange copy for edge_values\n");
+                 std::copy(edge_values, edge_values + e,
+                           std::ostream_iterator<Value>(vals_output, "\n"));
+                 vals_output.close();
+@@ -401,6 +417,15 @@ struct Csr
+     }
+ 
+ 
++    void read_edge_values()
++    {
++    	std::string values_fname = this->f_in +  ".val";
++		std::ifstream input_val(values_fname);
++		UCM_DBG("Reading edge_values from file %s, size = %ld\n",
++				values_fname.c_str(), this->edges * sizeof(Value));
++
++		input_val.read(reinterpret_cast<char*>(this->edge_values), this->edges * sizeof(Value));
++    }
+     /**
+      * @brief Read from stored row_offsets, column_indices arrays.
+      *
+@@ -410,13 +435,15 @@ struct Csr
+      * @param[in] quiet Don't print out anything.
+      */
+     template <bool LOAD_EDGE_VALUES>
+-    void FromCsr(char *f_in, bool quiet = false)
++    void FromCsr(char *f_in, bool quiet = false, bool shared_mem = false, bool mmap_gpu = false)
+     {
+         if (!quiet)
+         {
+             printf("  Reading directly from stored binary CSR arrays ...\n");
+         }
+         time_t mark1 = time(NULL);
++		this->f_in.assign(f_in);
++UCM_DBG("Enter shared_mem = %d mmap_gpu = %d f_in = %s\n", shared_mem, mmap_gpu, this->f_in.c_str());
+ 
+         std::ifstream input(f_in);
+         SizeT v, e;
+@@ -424,12 +451,15 @@ struct Csr
+         input.read(reinterpret_cast<char*>(&e), sizeof(SizeT));
+ 
+         FromScratch<LOAD_EDGE_VALUES, false>(v, e);
+-
+         input.read(reinterpret_cast<char*>(row_offsets), (v + 1)*sizeof(SizeT));
+         input.read(reinterpret_cast<char*>(column_indices), e * sizeof(VertexId));
+-        if (LOAD_EDGE_VALUES)
++        if (LOAD_EDGE_VALUES )
+         {
+-            input.read(reinterpret_cast<char*>(edge_values), e * sizeof(Value));
++        	if (shared_mem || mmap_gpu) {
++        		UCM_DBG("Skipping reading from file for edge_values because of shared mem or mmap_gpu\n");
++        	} else {
++        		read_edge_values();
++        	}
+         }
+ 
+         time_t mark2 = time(NULL);
+@@ -478,7 +508,6 @@ struct Csr
+         input.read(reinterpret_cast<char*>(&e), sizeof(SizeT));
+ 
+         FromScratch<false, LOAD_NODE_VALUES>(v, e);
+-
+         input.read(reinterpret_cast<char*>(row_offsets), (v + 1)*sizeof(SizeT));
+         input.read(reinterpret_cast<char*>(column_indices), e * sizeof(VertexId));
+         if (LOAD_NODE_VALUES)
+@@ -545,9 +574,9 @@ struct Csr
+         if (!quiet)
+         {
+             printf("  Converting %lld vertices, %lld directed edges (%s tuples) "
+-                   "to CSR format...\n", 
++                   "to CSR format... LOAD_EDGE_VALUES = %d\n", 
+                     (long long)coo_nodes, (long long)coo_edges,
+-                   ordered_rows ? "ordered" : "unordered");
++                   ordered_rows ? "ordered" : "unordered", (LOAD_EDGE_VALUES ? 1 : 0));
+         }
+ 
+         time_t mark1 = time(NULL);
+@@ -627,6 +656,7 @@ struct Csr
+                 if (LOAD_EDGE_VALUES)
+                 {
+                     //new_coo[edge].Val(edge_values[edge]);
++//UCM_DBG("setting  edge_values[%d] = %d\n", edge + edge_offset, new_coo[edge].val);
+                     edge_values[edge + edge_offset] = new_coo[edge].val;
+                 }
+             }
+diff --git a/gunrock/fileMap.cuh b/gunrock/fileMap.cuh
+new file mode 100644
+index 0000000..2cf422f
+--- /dev/null
++++ b/gunrock/fileMap.cuh
+@@ -0,0 +1,123 @@
++/**
++ * @file
++ * fileMap.cuh
++ *
++ * @brief files mmap support
++ */
++
++#pragma once
++
++#include <string>
++
++#include <sys/mman.h>
++#include <sys/stat.h>
++#include <fcntl.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <unistd.h>
++
++#define MAP_ON_GPU      0x80000
++
++//using namespace std;
++
++template<class Type>
++struct fileMapping
++{
++	std::string filename;
++	int fd;
++	long	map_start;
++	long	map_len;
++	Type 	*addr;	//addr returned by mmap
++
++	fileMapping() {
++		fd = -1;
++		map_start = 0;
++		map_len = 0;
++		addr = NULL;
++	}
++
++	fileMapping(std::string filename, long size = 0, long offset = 0, bool ON_GPU=false) {
++		struct stat sb;
++		printf("fileMapping: constructor enter. file = %s \n", filename.c_str());
++		//this->filename.assign(filename);
++		//Open file and save pointer
++		fd = open(filename.c_str(), O_RDWR);
++        if (fd == -1) {
++        	printf("fileMapping: Erro opening file\n");
++            return;
++        }
++		if (fstat(fd, &sb) == -1) {          /* To obtain file size */
++            //cout << "Erro fstat" <<endl;
++			close(fd);
++			return;
++		}
++		if (!size)
++			size = sb.st_size;
++		int flags = /*MAP_NORESERVE |*/ MAP_SHARED ;
++		if (ON_GPU)
++			flags |= MAP_ON_GPU;
++		printf("fileMapping: mapping size %ld file size %ld offset %ld ON_GPU=%d\n", size,  sb.st_size, offset,ON_GPU );
++		addr = (Type *)mmap(NULL, size,  PROT_READ | PROT_WRITE, flags, fd, offset);
++		map_len = size;
++		if (addr == MAP_FAILED) {
++			//cout << "ERROR mapping file" << endl;
++			close(fd);
++			return ;
++		}
++	}
++
++	int map(std::string filename, long size = 0, long offset = 0, bool ON_GPU=false) {
++		struct stat sb;
++		printf("fileMapping: mmap enter. file = %s \n", filename.c_str());
++		//this->filename.assign(filename);
++		//Open file and save pointer
++		fd = open(filename.c_str(), O_RDONLY);
++		if (fd == -1) {
++			printf("fileMapping: Erro opening file\n");
++			return -1;
++		}
++		if (fstat(fd, &sb) == -1) {          /* To obtain file size */
++			//cout << "Erro fstat" <<endl;
++			close(fd);
++			return -1;
++		}
++		if (!size) {
++			size = sb.st_size;
++		}
++		int flags = MAP_NORESERVE | MAP_SHARED ;
++		if (ON_GPU)
++				flags |= MAP_ON_GPU;
++		printf("fileMapping: map: mapping size %ld file size %ld offset %ld ON_GPU=%d\n", size,  sb.st_size, offset, ON_GPU );
++		addr = (Type *)mmap(NULL, size,  PROT_READ, flags, fd, offset);
++		map_len = size;
++		if (addr == MAP_FAILED) {
++			//cout << "ERROR mapping file" << endl;
++			close(fd);
++			return -1;
++		}
++		return 0;
++	}
++
++	void sync() {
++		msync(addr, map_len, MS_SYNC);
++	}
++
++	Type *get_addr(void) {
++		return addr;
++	}
++
++	~fileMapping(void) {
++		//unmap && close the mmaped file
++		printf("~fileMapping: closing&unmapping file %s\n", filename.c_str());
++		munmap(addr, map_len);
++		close(fd);
++	}
++
++};
++
++
++// Leave this at the end of the file
++// Local Variables:
++// mode:c++
++// c-file-style: "NVIDIA"
++// End:
+diff --git a/gunrock/graphio/market.cuh b/gunrock/graphio/market.cuh
+index 2671668..c484832 100644
+--- a/gunrock/graphio/market.cuh
++++ b/gunrock/graphio/market.cuh
+@@ -209,7 +209,8 @@ int ReadMarketStream(
+     time_t mark0 = time(NULL);
+     if (!quiet)
+     {
+-        printf("  Parsing MARKET COO format");
++        printf("  Parsing MARKET COO format: LOAD_VALUES= %d undirected = %d reversed= %d output_file = %s\n",
++		(LOAD_VALUES ? 1 : 0), (undirected ? 1 : 0), (reversed ? 1: 0), output_file );
+     }
+     fflush(stdout);
+ 
+@@ -487,12 +488,13 @@ int ReadCsrArrays_SM(char *f_in, char *f_label, Csr<VertexId, SizeT, Value> &csr
+  * @param[in] csr_graph     Csr graph object to store the graph data.
+  * @param[in] undirected    Is the graph undirected or not?
+  * @param[in] reversed      Whether or not the graph is inversed.
++ * @param[in] shared_mem	Use NVIDIA UVM
+  */
+ template <bool LOAD_VALUES, typename VertexId, typename SizeT, typename Value>
+ int ReadCsrArrays(char *f_in, Csr<VertexId, SizeT, Value> &csr_graph,
+-                  bool undirected, bool reversed, bool quiet)
++                  bool undirected, bool reversed, bool quiet, bool shared_mem = false)
+ {
+-    csr_graph.template FromCsr<LOAD_VALUES>(f_in, quiet);
++    csr_graph.template FromCsr<LOAD_VALUES>(f_in, quiet, shared_mem);
+     return 0;
+ }
+ 
+@@ -522,14 +524,17 @@ int BuildMarketGraph(
+     Csr<VertexId, SizeT, Value> &csr_graph,
+     bool undirected,
+     bool reversed,
+-    bool quiet = false)
++    bool quiet = false,
++    bool shared_mem = false,
++    bool mmap_gpu = false)
+ {
+     FILE *_file = fopen(output_file, "r");
+     if (_file)
+     {
+         fclose(_file);
++UCM_DBG("got outputfile = %s, reading from it shared_mem = %d mmap_gpu = %d\n", output_file, shared_mem, mmap_gpu);
+         if (ReadCsrArrays<LOAD_VALUES>(
+-                    output_file, csr_graph, undirected, reversed, quiet) != 0)
++                    output_file, csr_graph, undirected, reversed, quiet, shared_mem) != 0)
+         {
+             return -1;
+         }
+@@ -575,6 +580,12 @@ int BuildMarketGraph(
+             }
+         }
+     }
++
++UCM_DBG("done loading csr graph:\n");
++    csr_graph.DisplayGraph(true);
++
++    printf("\n\n");
++
+     return 0;
+ }
+ 
+@@ -765,7 +776,9 @@ int BuildMarketGraph(
+     Csr<VertexId, SizeT, Value> &graph,
+     bool undirected,
+     bool reversed,
+-    bool quiet = false)
++    bool quiet = false,
++    bool shared_mem = false,
++    bool mmap_gpu = false)
+ {
+     // seperate the graph path and the file name
+     char *temp1 = strdup(file_in);
+@@ -780,8 +793,11 @@ int BuildMarketGraph(
+             ((sizeof(VertexId) == 8) ? "64bVe." : ""), 
+             ((sizeof(Value   ) == 8) ? "64bVa." : ""), 
+             ((sizeof(SizeT   ) == 8) ? "64bSi." : ""));
++
++UCM_DBG(" undirected graph: ud = %s\n", ud);
++
+         if (BuildMarketGraph<LOAD_VALUES>(file_in, ud, graph,
+-                    true, false, quiet) != 0)
++                    true, false, quiet, shared_mem, mmap_gpu) != 0)
+             return 1;
+     }
+     else if (!undirected && reversed)
+@@ -792,7 +808,7 @@ int BuildMarketGraph(
+             ((sizeof(Value   ) == 8) ? "64bVa." : ""), 
+             ((sizeof(SizeT   ) == 8) ? "64bSi." : ""));
+         if (BuildMarketGraph<LOAD_VALUES>(file_in, rv, graph,
+-                    false, true, quiet) != 0)
++                    false, true, quiet, shared_mem, mmap_gpu) != 0)
+             return 1;
+     }
+     else if (!undirected && !reversed)
+@@ -803,7 +819,7 @@ int BuildMarketGraph(
+             ((sizeof(Value   ) == 8) ? "64bVa." : ""), 
+             ((sizeof(SizeT   ) == 8) ? "64bSi." : ""));
+         if (BuildMarketGraph<LOAD_VALUES>(file_in, di, graph,
+-                    false, false, quiet) != 0)
++                    false, false, quiet, shared_mem, mmap_gpu) != 0)
+             return 1;
+     }
+     else
+diff --git a/gunrock/util/array_utils.cuh b/gunrock/util/array_utils.cuh
+index f4ee65d..4d73369 100644
+--- a/gunrock/util/array_utils.cuh
++++ b/gunrock/util/array_utils.cuh
+@@ -56,6 +56,8 @@ private:
+     unsigned int setted, allocated;
+     Value        *h_pointer;
+     Value        *d_pointer;
++    bool		 shared;
++    bool		 mmaped;
+ 
+ public:
+     Array1D()
+@@ -66,6 +68,8 @@ public:
+         file_name = "";
+         h_pointer = NULL;
+         d_pointer = NULL;
++        shared = false;
++        mmaped = false;
+         flag      = cudaHostAllocDefault;
+         setted    = NONE;
+         allocated = NONE;
+@@ -81,6 +85,8 @@ public:
+         file_name = "";
+         h_pointer = NULL;
+         d_pointer = NULL;
++        shared = false;
++        mmaped = false;
+         setted    = NONE;
+         allocated = NONE;
+         flag      = cudaHostAllocDefault;
+@@ -139,7 +145,7 @@ public:
+         this->name=name;
+     }
+ 
+-    cudaError_t Allocate(SizeT size, unsigned int target = HOST)
++    cudaError_t Allocate(SizeT size, unsigned int target = HOST, bool shared = false)
+     {
+         cudaError_t retval = cudaSuccess;
+ 
+@@ -204,10 +210,17 @@ public:
+                 fflush(stdout);
+             }*/
+             if (size!=0) {
+-                retval = GRError(
+-                    cudaMalloc((void**)&(d_pointer), sizeof(Value) * size),
+-                    name+" cudaMalloc failed", __FILE__, __LINE__);
++            	if (shared){
++            		retval = GRError(
++				cudaMallocManaged((void**)&(d_pointer), sizeof(Value) * size),
++					name+" cudaMallocManaged failed", __FILE__, __LINE__);
++            		//UCM_DBG("Allocated managed memory 0x%llx size=%ld\n", d_pointer, sizeof(Value) * size);
++            	} else
++            		retval = GRError(
++				cudaMalloc((void**)&(d_pointer), sizeof(Value) * size),
++            				name+" cudaMalloc failed", __FILE__, __LINE__);
+                 if (retval) return retval;
++                this->shared = shared;
+             }
+             allocated = allocated | DEVICE;
+             if (ARRAY_DEBUG)
+@@ -224,6 +237,56 @@ public:
+         return retval;
+     } // Allocate(...)
+ 
++    cudaError_t Allocate_mapped(SizeT size, Value* pointer)
++    {
++        cudaError_t retval = cudaSuccess;
++        unsigned int target = DEVICE;
++
++         if ((target & HOST) == HOST)
++         {
++             if (retval = Release(HOST)) return retval;
++             UnSetPointer(HOST);
++             if ((setted    & (~(target    | DISK)) == NONE) &&
++                 (allocated & (~(allocated | DISK)) == NONE)) this->size=size;
++             h_pointer = new Value[size];
++             if (h_pointer == NULL)
++                 return GRError(name+" allocation on host failed", __FILE__, __LINE__);
++             if (use_cuda_alloc)
++             {
++                 retval = util::GRError(
++                     cudaHostRegister((void*)h_pointer, sizeof(Value)*size, flag),
++                     name+" cudaHostRegister failed.", __FILE__, __LINE__);
++                 if (retval) return retval;
++             }
++             allocated = allocated | HOST;
++             if (ARRAY_DEBUG)
++             {
++                 printf("%s\t allocated on HOST, length =\t %lld, "
++                     "size =\t %lld bytes, pointer =\t %p\n",
++                     name.c_str(), (long long) size,
++                     (long long) size*sizeof(Value), h_pointer);
++                 fflush(stdout);
++             }
++         }
++
++         if ((target & DEVICE) == DEVICE)
++         {
++             if (retval = Release(DEVICE)) return retval;
++             UnSetPointer(DEVICE);
++             if ((setted    & (~(target    | DISK)) == NONE) &&
++                 (allocated & (~(allocated | DISK)) == NONE)) this->size=size;
++
++             if (size!=0)
++             	d_pointer = pointer;
++
++             allocated = allocated | DEVICE;
++
++         }
++         //}
++         this->size=size;
++         return retval;
++    } // Allocate(...)
++
+     cudaError_t Release(unsigned int target = TARGETALL)
+     {
+         cudaError_t retval = cudaSuccess;
+@@ -374,10 +437,12 @@ public:
+         return NULL;
+     } // GetPointer(...)
+ 
+-    cudaError_t SetPointer(Value* pointer, SizeT size = -1, unsigned int target = HOST)
++    cudaError_t SetPointer(Value* pointer, SizeT size = -1, unsigned int target = HOST, bool mmaped = false)
+     {
+         cudaError_t retval = cudaSuccess;
++        this->mmaped = mmaped;
+         if (size == -1) size=this->size;
++// UCM_DBG("name= %s size = %d, this->size = %d target = 0x%x\n", this->name, size, this->size, target);
+         if (size < this->size)
+         {
+             if (ARRAY_DEBUG) {
+@@ -390,6 +455,7 @@ public:
+ 
+         if (target == HOST)
+         {
++
+             if (retval = Release(HOST)) return retval;
+             if (use_cuda_alloc)
+             {
+@@ -411,16 +477,17 @@ public:
+ 
+         if (target == DEVICE)
+         {
+-            if (retval = Release(DEVICE)) return retval;
++        	if (d_pointer)
++        		if (retval = Release(DEVICE)) return retval;
+             d_pointer = pointer;
+             if (setted == NONE && allocated == NONE) this->size=size;
+             setted    = setted | DEVICE;
+-            if (ARRAY_DEBUG) {
++     //       if (ARRAY_DEBUG) {
+                 printf("%s\t setted on DEVICE, size =\t %lld, "
+                     "pointer =\t %p\n", name.c_str(),
+                     (long long)this->size, d_pointer);
+                 fflush(stdout);
+-            }
++    //        }
+         }
+         return retval;
+     } // SetPointer(...)
+@@ -495,6 +562,9 @@ public:
+         cudaStream_t stream=0)
+     {
+         cudaError_t retval = cudaSuccess;
++        if (this->mmaped)
++        	return retval;
++
+         if ((source == HOST || source == DEVICE) &&
+             ((source & setted) != source) && ((source & allocated) != source))
+             return GRError(name+" movment source is not valid", __FILE__, __LINE__);
+@@ -516,9 +586,11 @@ public:
+                 (long long) offset, stream, d_pointer, h_pointer);
+             fflush(stdout);
+         }
+-
+         if      (source == HOST   && target == DEVICE) {
+-            if (use_cuda_alloc && stream != 0)
++        	if (shared && name == "weights") {
++        		std::memcpy( d_pointer + offset, h_pointer + offset, sizeof(Value) * size);
++        	}
++        	else if (use_cuda_alloc && stream != 0)
+             {
+                 retval = GRError(
+                     cudaMemcpyAsync( d_pointer + offset, h_pointer + offset,
+@@ -535,7 +607,10 @@ public:
+         }
+ 
+         else if (source == DEVICE && target == HOST  ) {
+-            if (use_cuda_alloc && stream != 0)
++        	if (shared && name == "weights") {
++        		std::memcpy( h_pointer + offset, d_pointer + offset, sizeof(Value) * size);
++        	}
++        	else if (use_cuda_alloc && stream != 0)
+             {
+                 //printf("%s MemcpyAsync\n");
+                 retval = GRError(
+diff --git a/gunrock/util/error_utils.cuh b/gunrock/util/error_utils.cuh
+index 047fb74..d569f1a 100644
+--- a/gunrock/util/error_utils.cuh
++++ b/gunrock/util/error_utils.cuh
+@@ -26,6 +26,22 @@ enum gunrockError {
+ 
+ typedef enum gunrockError gunrockError_t;
+ 
++
++#define UCM_PRINT_FUNC_PREFIX(fmt, ...)	\
++	printf("%s:%u %s(): " fmt,	\
++	__FILE__,		\
++	__LINE__,			\
++	__FUNCTION__,			\
++	##__VA_ARGS__)
++
++#if 1
++#define UCM_DBG(fmt, ...)	\
++	UCM_PRINT_FUNC_PREFIX("UCM-DBG " fmt, ##__VA_ARGS__)
++#else
++#define UCM_DBG(fmt, ...)	do { } while(0)
++#endif
++
++
+ /**
+  * Displays error message in accordance with debug mode
+  */
+diff --git a/gunrock/util/info.cuh b/gunrock/util/info.cuh
+index 24310ec..ec58d3c 100644
+--- a/gunrock/util/info.cuh
++++ b/gunrock/util/info.cuh
+@@ -67,6 +67,12 @@ public:
+     void         *context;  // pointer to context array used by MordernGPU
+     cudaStream_t *streams;  // pointer to array of GPU streams
+ 
++    bool			shared_mem;
++    bool			mmap_gpu;
++    bool			producer;
++    int				percent;
++    int			flush;
++
+     /**
+      * @brief Info default constructor
+      */
+@@ -91,7 +97,7 @@ public:
+         info["write_time"]         = 0.0f;   // output writing time
+         info["output_filename"]    = "";     // output filename
+         info["engine"]             = "";     // engine name - Gunrock
+-        info["edge_value"]         = false;  // default don't load weights
++        info["edge_value"]         = true;  // default don't load weights
+         info["random_edge_value"]  = false;  // whether to generate edge weights
+         info["git_commit_sha1"]    = "";     // git commit sha1
+         info["graph_type"]         = "";     // input graph type
+@@ -155,6 +161,12 @@ public:
+         info["64bit_VertexId"     ]= (sizeof(VertexId) == 8) ? true : false;
+         info["64bit_SizeT"        ]= (sizeof(SizeT   ) == 8) ? true : false;
+         info["64bit_Value"        ]= (sizeof(Value   ) == 8) ? true : false;
++
++        shared_mem = false;
++        mmap_gpu = false;
++        producer = false;
++        percent = 50;
++        flush = 0;
+         // info["gpuinfo"]
+         // info["device_list"]
+         // info["sysinfo"]
+@@ -511,6 +523,7 @@ public:
+         // load or generate input graph
+         if (info["edge_value"].get_bool() && !info["random_edge_value"].get_bool())
+         {
++UCM_DBG("load graph with weighs!\n");
+             LoadGraph<true, false>(args, csr_ref);  // load graph with weighs
+         }
+         else
+@@ -534,6 +547,21 @@ public:
+         info["stddev_degrees"] = (float)csr_ref.GetStddevDegree();
+         info["num_vertices"] = (int64_t)csr_ref.nodes;
+         info["num_edges"   ] = (int64_t)csr_ref.edges;
++
++        shared_mem = (args.CheckCmdLineFlag("shared_mem") ? true : false);
++        mmap_gpu = (args.CheckCmdLineFlag("mmap_gpu") ? true : false);
++        producer = (args.CheckCmdLineFlag("producer") ? true : false);
++        if (args.CheckCmdLineFlag("percent")) {
++			args.GetCmdLineArgument("flush", flush);
++		}
++        if (args.CheckCmdLineFlag("percent")) {
++			args.GetCmdLineArgument("percent", percent);
++		}
++
++        if (shared_mem && mmap_gpu) {
++        	 printf("\n\n%s : %d:  ERROR:can's set both shared_mem and mmap_gpu\n", __FILE__, __LINE__);
++        	 shared_mem = mmap_gpu = false;
++        }
+     }
+ 
+     /**
+@@ -856,6 +884,7 @@ public:
+             }
+ 
+             char *market_filename = args.GetCmdLineArgvDataset();
++UCM_DBG("filename = %s shared = %d mmap_gpu = %d\n", market_filename, this->shared_mem, this->mmap_gpu);
+ 
+             std::ifstream fp(market_filename);
+             if (market_filename == NULL||!fp.is_open())
+@@ -871,7 +900,9 @@ public:
+                         csr_ref,
+                         info["undirected"].get_bool(),
+                         INVERSE_GRAPH,
+-                        args.CheckCmdLineFlag("quiet")) != 0)
++                        args.CheckCmdLineFlag("quiet"),
++                        this->shared_mem,
++                        this->mmap_gpu) != 0)
+             {
+                 return 1;
+             }
+diff --git a/tests/my_test/Makefile b/tests/my_test/Makefile
+new file mode 100644
+index 0000000..aff3a64
+--- /dev/null
++++ b/tests/my_test/Makefile
+@@ -0,0 +1 @@
++g++ -std=c++11 -o test main_test.cpp
+diff --git a/tests/my_test/my_test.cpp b/tests/my_test/my_test.cpp
+new file mode 100644
+index 0000000..c8e268b
+--- /dev/null
++++ b/tests/my_test/my_test.cpp
+@@ -0,0 +1,104 @@
++//#include <boost/interprocess/shared_memory_object.hpp>
++//#include <boost/interprocess/mapped_region.hpp>
++//#include <boost/interprocess/file_mapping.hpp>
++
++#include <fstream>
++#include <iostream>
++#include <string>
++#include <vector>
++#include <sstream>
++#include <cstddef>
++
++
++
++//using namespace boost::interprocess;
++using namespace std;
++
++
++struct  Edge
++{
++    int from;//from vertex
++    int to; //to vertex
++    int val;
++};
++
++class myGraph
++{
++    private:
++    vector <struct  Edge> edges;
++
++    public:
++    void add_adge(string line);
++    void print(void);
++
++};
++
++/*
++   I will give you a bit of work, make the funtions getdata() and dispdata()
++   It's easy and not worth for me to bother with now :-}
++*/
++void myGraph::add_adge(string line) //get user input
++{
++	stringstream ss(line);
++	string token;
++	Edge edge;
++
++	getline(ss, token, ' ');
++	edge.from = stoi(token);
++
++	getline(ss, token, ' ');
++	edge.to = stoi(token);
++
++	getline(ss, token, ' ');
++	edge.val = stoi(token);
++
++	edges.push_back(edge);
++}
++
++void myGraph::print(void)
++{
++	int sz = edges.size();
++	for ( int i = 0; i < sz; i++ )
++		cout << edges[i].from << " " << edges[i].to << " " << edges[i].val << endl;
++}
++
++const char *filename = "/home/tanya/gunrock/tests/my_test/road_usa.mtx";
++const char *filename2 = "/home/tanya/gunrock/tests/my_test/road_usa.mtx2";
++const char *bin_filename = "/home/tanya/gunrock/tests/my_test/test_mst.mtx.di.1.bin";
++
++//This program is not tested, have fun fixing errors, if any
++//I am a taos programmer so dont expect anything major
++//Typing mistakes are not errors
++//This was done off the cuff and not even compiled once
++int main()
++{
++    fstream dataf ;  //file handle
++    ofstream fout (filename2, ios::out);
++    myGraph	g;
++
++    dataf.open(filename,ios::in|ios::out);
++
++    if(dataf.is_open()) {
++    	cout << "File has been opened" << "\n";
++    } else {
++      cout << "ERROR, file " << filename << "can't be found" << endl;
++      return 1;
++    }
++
++    string line;
++    fout << line << endl;;
++    cout << "first line of file " << line << endl << endl;
++
++    while (getline(dataf, line)) {
++    	//cout << line << endl;
++	fout << line + " 3" << endl;;
++    	//g.add_adge(line);
++    }
++
++    
++    dataf.close();       //close the file
++    fout.close();
++
++    cout<<"\nEnd of Program" << endl;
++    return 0;
++}
+diff --git a/tests/my_test/test b/tests/my_test/test
+new file mode 100755
+index 0000000000000000000000000000000000000000..194d12e43f0108f979c6adac2bc8dad02c77e58b
+GIT binary patch
+literal 30344
+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
+
+literal 0
+HcmV?d00001
+
+diff --git a/tests/sssp/producer_cpu.cuh b/tests/sssp/producer_cpu.cuh
+new file mode 100644
+index 0000000..96af72c
+--- /dev/null
++++ b/tests/sssp/producer_cpu.cuh
+@@ -0,0 +1,109 @@
++
++#include <string>
++#include <gunrock/fileMap.cuh>
++
++template<class Value>
++struct producer
++{
++	fileMapping<char>	map_addr;
++	int msqid;
++	key_t key = MSG_QUEUE_KEY;
++	int ittr;
++
++	long random_at_most(long max) {
++	  unsigned long
++	    // max <= RAND_MAX < ULONG_MAX, so this is okay.
++	    num_bins = (unsigned long) max + 1,
++	    num_rand = (unsigned long) RAND_MAX + 1,
++	    bin_size = num_rand / num_bins,
++	    defect   = num_rand % num_bins;
++
++	  long x;
++	  do {
++	   x = get_random_number(RAND_MAX, get_random_seed());//random();
++	  }
++	  // This is carefully written not to overflow
++	  while (num_rand - defect <= (unsigned long)x);
++
++	  // Truncated division is intentional
++	  return x/bin_size;
++	}
++	#define MSG_TYPE 0
++
++
++	struct msgbuf_t
++	{
++		long    mtype;
++		char    mtext[MAXSIZE];
++	};
++
++	int get_offset(int rand_max)
++	{
++		return (random_at_most(rand_max)/sizeof(Value))*sizeof(Value);
++	}
++
++	int run_test(void)
++	{
++		struct msgbuf_t sbuf;
++		size_t buflen;
++		/* Done preparing files */
++		for (int i = 0; i < ittr; i++) {
++			int offset = get_offset(map_addr.map_len) ;
++			printf("PRODUCER: will update at offset = %d, addr=0x%llx \n",
++					offset, (Value*)map_addr.get_addr() + offset);
++			*(Value*)map_addr.get_addr() = random_at_most(map_addr.map_len);
++
++
++			sleep(1);
++		}
++
++		printf("PRODUCER: Done\n");
++		return;
++
++		static int idx = 0;
++
++		int msqid;
++			key_t key = MSG_QUEUE_KEY;
++
++		/* First update the file at random location */
++		int offset = get_offset(rand_max) ;
++	printf("PRODUCER: will update at offset = %d, addr=0x%llx page_idx=%d, GPU page idx = %d\n",
++		offset, &input[offset], offset*8/4096, (offset*8/4096)/16);
++
++		strncpy(&input[offset], &words[idx], MIN(MAXSIZE,8));
++
++		/* Now send the msg */
++		if (msqid  < 0) {   //Get the message queue ID for the given key
++				perror("PRODUCER: msgget");
++			return -1;
++		}
++
++		sbuf.mtype = 1;
++		strncpy(sbuf.mtext, &words[idx], MIN(MAXSIZE,8));
++		if (msgsnd(msqid, &sbuf, MIN(MAXSIZE,9), IPC_NOWAIT) < 0){
++			perror("PRODUCER: msgsnd");
++			return -1;
++		}
++			printf ("PRODUCER: msg sent = %s\n",sbuf.mtext );
++
++	//if (msync(input,  fsize, MS_SYNC))
++	//printf("error msync from producer\n");
++
++		idx +=9;
++		return offset;
++	}
++	
++	producer(string file_name, int iterations)
++	{
++		fileMapping<char>	map_addr(file_name);
++		UCM_DBG("enter. file = %s size = %d\n", file_name.c_str(), map_addr.map_len);
++
++		//Flush the msg queue before startingthe test
++		if ((msqid = msgget(key, IPC_CREAT | 0666 )) < 0) {   //Get the message queue ID for the given key
++			perror("PRODUCER: msgget");
++			return;
++		}
++		msgctl(msqid, IPC_RMID, NULL);
++		ittr = iterations;
++	}
++}
+diff --git a/tests/sssp/test_sssp.cu b/tests/sssp/test_sssp.cu
+index 022c796..cec0f06 100644
+--- a/tests/sssp/test_sssp.cu
++++ b/tests/sssp/test_sssp.cu
+@@ -18,6 +18,16 @@
+ #include <vector>
+ #include <iostream>
+ 
++#include <chrono>
++#include <random>
++
++#include <sys/mman.h>
++#include <pthread.h>
++#include <sys/wait.h>
++#include <thread>         // std::thread, std::this_thread::sleep_for
++#include <gunrock/fileMap.cuh>
++
++
+ // Utilities and correctness-checking
+ #include <gunrock/util/test_utils.cuh>
+ 
+@@ -111,6 +121,11 @@ void Usage()
+         "[--jsonfile=<name>]       Output JSON-format statistics to file <name>\n"
+         "[--jsondir=<dir>]         Output JSON-format statistics to <dir>/name,\n"
+         "                          where name is auto-generated.\n"
++    	"[--shared_mem=<0|1>	   Alocate device memory with CudaMalloMAnaged (Default: 0)\n"
++    	"[--mmap_gpu=<0|1>		   Mmap the input binary file onto gpu (default = 0\n"
++    	"[--producer=<0|1>		   Run producer consumer test\n"
++    	"[--percent=<0-100>		   % of input file to update in the producer test\n"
++    	"[--flush=<0|1>		   Flash the page cache before each problem reset\n"
+     );
+ }
+ 
+@@ -272,6 +287,53 @@ void ReferenceSssp(
+     if (sort_pred) free(sort_pred);
+ }
+ 
++long get_random_number(int min, long max)
++{
++  // construct a trivial random generator engine from a time-based seed:
++  unsigned seed = std::chrono::system_clock::now().time_since_epoch().count();
++  std::default_random_engine generator (seed);
++
++  std::uniform_int_distribution<long> distribution(min,max);
++
++  return distribution(generator);
++}
++
++template <typename SizeT, typename Value>
++void producer(int *req_pending, pthread_mutex_t *mutex, int ittr, std::string fname, SizeT edges, int persent_to_update)
++{
++	std::string tmp(fname + ".val");
++	fileMapping<char> map_addr(tmp.c_str());
++	int i;
++	//map_addr.map(fname, 0, 0, false) ;
++	Value    *edge_values = (Value *)map_addr.get_addr();
++	UCM_DBG("Mapped file %s on cpu for size %ld edges = %d\n", tmp.c_str(), map_addr.map_len, edges);
++
++	int num_updates = map_addr.map_len / (64*1024) ; //=number of gpu pages holding the file
++	num_updates = num_updates * persent_to_update / 100;
++	if (!num_updates) num_updates = 1;
++	for (i = 0; i < ittr; i++) {
++		UCM_DBG("PRODUCER: Will make %ld updates (== %ld %) fsize=%ld bytes (= %d gpu pages)\n", num_updates, persent_to_update, map_addr.map_len,
++				map_addr.map_len/(64*1024));
++		while (*req_pending > 0);
++		for (int upd = 0; upd < num_updates; upd++) {
++			long int gpu_page = upd;//get_random_number(0, map_addr.map_len / (64*1024));
++			int value = get_random_number(0, 2048);
++//			UCM_DBG("PRODUCER: will update at offse t %d, value = %d req_pending=%d\n", offset, value, *req_pending);
++
++		//	sleep(get_random_number(1,3));
++		//	UCM_DBG("PRODUCER: done sleeping\n");
++			edge_values[gpu_page * 64 * 1024/ sizeof(int) + 1] = value;
++		}
++		map_addr.sync();
++		pthread_mutex_lock(mutex);
++		(*req_pending)+= 10;
++	printf("PRODUCER: updated %d gpu pages\n", num_updates);
++		pthread_mutex_unlock(mutex);
++		sleep(get_random_number(3,6));
++	}
++	UCM_DBG("PRODUCER: exiting i =%d\n", i);
++	exit(0);
++}
+ 
+ /**
+  * @brief Run SSSP tests
+@@ -375,7 +437,7 @@ cudaError_t RunTests(Info<VertexId, SizeT, Value> *info)
+         max_queue_sizing,
+         max_in_sizing,
+         partition_factor,
+-        partition_seed),
++        partition_seed, info->shared_mem, info->mmap_gpu),
+         "SSSP Problem Init failed", __FILE__, __LINE__))
+         return retval;
+ 
+@@ -421,8 +483,50 @@ cudaError_t RunTests(Info<VertexId, SizeT, Value> *info)
+         srand(src_seed);
+     }
+     if (!quiet_mode) printf("Using traversal mode %s\n", traversal_mode.c_str());
++
++    pthread_mutexattr_t attributes;
++    int handle;
++    char *shared_memory;
++    pthread_mutex_t *mutex;
++   // pid_t pid;
++    int *req_pending;
++    std::thread *t1;
++    if (info->producer) {
++		UCM_DBG("Initialize and start Producer thread\n");
++		pthread_mutexattr_init(&attributes);
++		pthread_mutexattr_setpshared(&attributes, PTHREAD_PROCESS_SHARED);
++
++		handle = shm_open("/shm", O_CREAT | O_RDWR, 0777);
++		ftruncate(handle, 2048*sizeof(int));
++		shared_memory = (char *)mmap(0, 2048*sizeof(int), PROT_READ | PROT_WRITE,
++						   MAP_SHARED, handle, 0);
++		// mutex share
++		mutex = (pthread_mutex_t*)shared_memory;
++		pthread_mutex_init(mutex, &attributes);
++
++		pthread_mutexattr_destroy(&attributes);
++
++		// variable share
++		req_pending = (int*)(shared_memory + sizeof(pthread_mutex_t)*2);
++		*req_pending = 0;
++	//	printf("\n\nDBG: req_pending=0x%llx, mutex = 0x%llx\n\n", req_pending, mutex );
++		t1 = new std::thread(producer<SizeT, Value>, req_pending, mutex, iterations, graph->f_in, graph->edges, info->percent);
++    }
+     for (int iter = 0; iter < iterations; ++iter)
+     {
++    	//std::string input = "";
++    	//getline(std::cin, input);
++    	if  (info->producer) {
++    		//wait for producer
++    	//	UCM_DBG("CONSUMER: waiting on count\n");
++    		while (*req_pending == 0);
++    	//	UCM_DBG("CONSUMER: waiting on count done\n");
++    		sleep(5);
++    	}
++        if (!quiet_mode)
++        {
++            printf("__________________________\n"); fflush(stdout);
++        }
+         if (src_type == "random2")
+         {
+             bool src_valid = false;
+@@ -434,6 +538,23 @@ cudaError_t RunTests(Info<VertexId, SizeT, Value> *info)
+             }
+         }
+ 
++        if (!quick_mode) {
++        	UCM_DBG("Read graphs data for comparing to cpu\n");
++        	graph->read_edge_values();
++        }
++
++        if (info->flush) {
++        	char cmdbuf[256];
++        	std::string tmp(graph->f_in + ".val");
++
++			snprintf(cmdbuf, sizeof(cmdbuf), "vmtouch -ev %s",tmp.c_str());
++			if ( system(cmdbuf) )
++				fprintf(stderr, "drop_cache write failed! The tests results are not accurate/trustworthy\n");
++			else
++				printf("Dropped caches... for file %s\n", tmp.c_str());
++			sleep(5);
++        }
++ //       cpu_timer.Start();
+         if (retval = util::GRError(problem->Reset(
+             src, enactor->GetFrontierType(),
+             max_queue_sizing, max_queue_sizing1),
+@@ -452,11 +573,10 @@ cudaError_t RunTests(Info<VertexId, SizeT, Value> *info)
+                 "cudaDeviceSynchronize failed", __FILE__, __LINE__))
+                 return retval;
+         }
++ //       cpu_timer.Stop();
++
++//        printf("Reset_timing,%lf,ms\n", cpu_timer.ElapsedMillis());
+ 
+-        if (!quiet_mode)
+-        {
+-            printf("__________________________\n"); fflush(stdout);
+-        }
+         cpu_timer.Start();
+         if (retval = util::GRError(enactor->Enact(src, traversal_mode),
+             "SSSP Problem Enact Failed", __FILE__, __LINE__))
+@@ -470,72 +590,92 @@ cudaError_t RunTests(Info<VertexId, SizeT, Value> *info)
+         if (!quiet_mode)
+         {
+             printf("--------------------------\n"
+-                "iteration %d elapsed: %lf ms, src = %lld, #iteration = %lld\n",
++                "ittr,%d,kernel_timing,%lf,ms,src,%lld,#iteration,%lld\n",
+                 iter, single_elapsed, (long long)src,
+                 (long long)enactor -> enactor_stats -> iteration);
+             fflush(stdout);
+         }
+-    }
+-    total_elapsed /= iterations;
+-    info -> info["process_times"] = process_times;
+-    info -> info["min_process_time"] = min_elapsed;
+-    info -> info["max_process_time"] = max_elapsed;
+-
+-    // compute reference CPU SSSP solution for source-distance
+-    if (!quick_mode)
+-    {
+-        if (!quiet_mode) { printf("Computing reference value ...\n"); }
+-        ReferenceSssp<VertexId, SizeT, Value, MARK_PREDECESSORS>(
+-            *graph,
+-            reference_check_label,
+-            reference_check_pred,
+-            src,
+-            quiet_mode);
+-        if (!quiet_mode) { printf("\n"); }
+-    }
++#if 1
++        // compute reference CPU SSSP solution for source-distance
++        if (!quick_mode)
++        {
++        	printf("Now compare to cpu...\n");
++            if (!quiet_mode) { printf("Computing reference value ...\n"); }
++            ReferenceSssp<VertexId, SizeT, Value, MARK_PREDECESSORS>(
++                *graph,
++                reference_check_label,
++                reference_check_pred,
++                src,
++                quiet_mode);
++            if (!quiet_mode) { printf("\n"); }
++        }
+ 
+-    cpu_timer.Start();
+-    // Copy out results
+-    if (retval = util::GRError(problem->Extract(h_labels, h_preds),
+-        "SSSP Problem Data Extraction Failed", __FILE__, __LINE__))
+-        return retval;
++        cpu_timer.Start();
++        // Copy out results
++        if (retval = util::GRError(problem->Extract(h_labels, h_preds),
++            "SSSP Problem Data Extraction Failed", __FILE__, __LINE__))
++            return retval;
+ 
+-    if (!quick_mode) {
+-        for (SizeT i = 0; i < graph->nodes; i++)
+-        {
+-            if (reference_check_label[i] == -1)
++        if (!quick_mode) {
++            for (SizeT i = 0; i < graph->nodes; i++)
+             {
+-                reference_check_label[i] = util::MaxValue<Value>();
++                if (reference_check_label[i] == -1)
++                {
++                    reference_check_label[i] = util::MaxValue<Value>();
++                }
+             }
+         }
+-    }
+ 
+-    if (!quiet_mode)
+-    {
+-        // Display Solution
+-        printf("\nFirst 40 labels of the GPU result.\n");
+-        DisplaySolution(h_labels, graph->nodes);
+-    }
+-    // Verify the result
+-    if (!quick_mode)
+-    {
+-        if (!quiet_mode) { printf("Label Validity: "); }
+-        int error_num = CompareResults(
+-                            h_labels, reference_check_label,
+-                            graph->nodes, true, quiet_mode);
+-        if (error_num > 0)
++        if (!quiet_mode)
+         {
+-            if (!quiet_mode) { printf("%d errors occurred.\n", error_num); }
++            // Display Solution
++            printf("\nFirst 40 labels of the GPU result.\n");
++            DisplaySolution(h_labels, graph->nodes);
+         }
+-        if (!quiet_mode)
++        // Verify the result
++        if (!quick_mode)
+         {
+-            printf("\nFirst 40 labels of the reference CPU result.\n");
+-            DisplaySolution(reference_check_label, graph->nodes);
++            if (!quiet_mode) { printf("Label Validity: "); }
++            int error_num = CompareResults(
++                                h_labels, reference_check_label,
++                                graph->nodes, true, quiet_mode);
++            if (error_num > 0)
++            {
++                if (!quiet_mode) { printf("%d errors occurred.\n", error_num); }
++            }
++            if (!quiet_mode)
++            {
++                printf("\nFirst 40 labels of the reference CPU result.\n");
++                DisplaySolution(reference_check_label, graph->nodes);
++            }
++        }
++
++        info->ComputeTraversalStats(  // compute running statistics
++            enactor->enactor_stats.GetPointer(), total_elapsed, h_labels);
++#endif
++        if (info->producer) {
++        	//signal producer that I'm done processsing
++        	pthread_mutex_lock(mutex);
++			if (*req_pending > 0) {
++				printf("CONSUMER: consumed i = %d req_pending=%d\n", iter, *req_pending);
++				(*req_pending)=0;
++			}
++			else printf("\n\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!ERROR - CONSUMER: producer was too fasr\n\n\n");
++			//printf("Child process increased the count to %d\n", *count);
++			pthread_mutex_unlock(mutex);
+         }
+     }
++    total_elapsed /= iterations;
++    info -> info["process_times"] = process_times;
++    info -> info["min_process_time"] = min_elapsed;
++    info -> info["max_process_time"] = max_elapsed;
+ 
+-    info->ComputeTraversalStats(  // compute running statistics
+-        enactor->enactor_stats.GetPointer(), total_elapsed, h_labels);
++    if (info->producer) {
++    	printf("CONSUMER: waiting for child process to join\n");
++    	t1->join();
++		munmap(shared_memory, 2048*sizeof(int));
++		shm_unlink("/shm");
++    }
+ 
+     if (!quiet_mode)
+     {
+@@ -549,45 +689,6 @@ cudaError_t RunTests(Info<VertexId, SizeT, Value> *info)
+                 DisplaySolution(reference_check_pred, graph->nodes);
+             }
+         }
+-
+-        /*printf("\n\tMemory Usage(B)\t");
+-        for (int gpu = 0; gpu < num_gpus; gpu++)
+-            if (num_gpus > 1) {if (gpu != 0) printf(" #keys%d,0\t #keys%d,1\t #ins%d,0\t #ins%d,1", gpu, gpu, gpu, gpu); else printf(" #keys%d,0\t #keys%d,1", gpu, gpu);}
+-            else printf(" #keys%d,0\t #keys%d,1", gpu, gpu);
+-        if (num_gpus > 1) printf(" #keys%d", num_gpus);
+-        printf("\n");
+-        double max_queue_sizing_[2] = {0, 0}, max_in_sizing_ = 0;
+-        for (int gpu = 0; gpu < num_gpus; gpu++)
+-        {
+-            size_t gpu_free, dummy;
+-            cudaSetDevice(gpu_idx[gpu]);
+-            cudaMemGetInfo(&gpu_free, &dummy);
+-            printf("GPU_%d\t %ld", gpu_idx[gpu], org_size[gpu] - gpu_free);
+-            for (int i = 0; i < num_gpus; i++)
+-            {
+-                for (int j = 0; j < 2; j++)
+-                {
+-                    SizeT x = problem->data_slices[gpu]->frontier_queues[i].keys[j].GetSize();
+-                    printf("\t %lld", (long long) x);
+-                    double factor = 1.0 * x / (num_gpus > 1 ? problem->graph_slices[gpu]->in_counter[i] : problem->graph_slices[gpu]->nodes);
+-                    if (factor > max_queue_sizing_[j]) max_queue_sizing_[j] = factor;
+-                }
+-                if (num_gpus > 1 && i != 0 )
+-                    for (int t = 0; t < 2; t++)
+-                    {
+-                        SizeT x = problem->data_slices[gpu][0].keys_in[t][i].GetSize();
+-                        printf("\t %lld", (long long) x);
+-                        double factor = 1.0 * x / problem->graph_slices[gpu]->in_counter[i];
+-                        if (factor > max_in_sizing_) max_in_sizing_ = factor;
+-                    }
+-            }
+-            if (num_gpus > 1) printf("\t %lld", (long long)(problem->data_slices[gpu]->frontier_queues[num_gpus].keys[0].GetSize()));
+-            printf("\n");
+-        }
+-        printf("\t queue_sizing =\t %lf \t %lf", max_queue_sizing_[0], max_queue_sizing_[1]);
+-        if (num_gpus > 1) printf("\t in_sizing =\t %lf", max_in_sizing_);
+-        printf("\n");
+-        */
+     }
+ 
+     if (!quiet_mode)
+diff --git a/tests/sssp/test_sssp.cu.orig b/tests/sssp/test_sssp.cu.orig
+new file mode 100644
+index 0000000..2d19b75
+--- /dev/null
++++ b/tests/sssp/test_sssp.cu.orig
+@@ -0,0 +1,874 @@
++// ----------------------------------------------------------------
++// Gunrock -- Fast and Efficient GPU Graph Library
++// ----------------------------------------------------------------
++// This source code is distributed under the terms of LICENSE.TXT
++// in the root directory of this source distribution.
++// ----------------------------------------------------------------
++
++/**
++ * @file
++ * test_sssp.cu
++ *
++ * @brief Simple test driver program for single source shortest path.
++ */
++
++#include <stdio.h>
++#include <string>
++#include <deque>
++#include <vector>
++#include <iostream>
++
++#include <chrono>
++#include <random>
++
++#include <sys/mman.h>
++#include <pthread.h>
++#include <sys/wait.h>
++#include <thread>         // std::thread, std::this_thread::sleep_for
++#include <gunrock/fileMap.cuh>
++
++
++// Utilities and correctness-checking
++#include <gunrock/util/test_utils.cuh>
++
++// SSSP includes
++#include <gunrock/app/sssp/sssp_enactor.cuh>
++#include <gunrock/app/sssp/sssp_problem.cuh>
++#include <gunrock/app/sssp/sssp_functor.cuh>
++
++
++#include <gunrock/app/sample/sample_enactor.cuh>
++
++// Operator includes
++#include <gunrock/oprtr/advance/kernel.cuh>
++#include <gunrock/oprtr/filter/kernel.cuh>
++#include <gunrock/priority_queue/kernel.cuh>
++
++#include <gunrock/util/shared_utils.cuh>
++
++#include <moderngpu.cuh>
++
++// Boost includes for CPU Dijkstra SSSP reference algorithms
++#include <boost/config.hpp>
++#include <boost/graph/graph_traits.hpp>
++#include <boost/graph/adjacency_list.hpp>
++#include <boost/graph/dijkstra_shortest_paths.hpp>
++#include <boost/property_map/property_map.hpp>
++
++using namespace gunrock;
++using namespace gunrock::app;
++using namespace gunrock::util;
++using namespace gunrock::oprtr;
++using namespace gunrock::app::sssp;
++
++/******************************************************************************
++ * Housekeeping Routines
++ ******************************************************************************/
++void Usage()
++{
++    printf(
++        "test <graph-type> [graph-type-arguments]\n"
++        "Graph type and graph type arguments:\n"
++        "    market <matrix-market-file-name>\n"
++        "        Reads a Matrix-Market coordinate-formatted graph of\n"
++        "        directed/undirected edges from STDIN (or from the\n"
++        "        optionally-specified file).\n"
++        "    rmat (default: rmat_scale = 10, a = 0.57, b = c = 0.19)\n"
++        "        Generate R-MAT graph as input\n"
++        "        --rmat_scale=<vertex-scale>\n"
++        "        --rmat_nodes=<number-nodes>\n"
++        "        --rmat_edgefactor=<edge-factor>\n"
++        "        --rmat_edges=<number-edges>\n"
++        "        --rmat_a=<factor> --rmat_b=<factor> --rmat_c=<factor>\n"
++        "        --rmat_seed=<seed>\n"
++        "    rgg (default: rgg_scale = 10, rgg_thfactor = 0.55)\n"
++        "        Generate Random Geometry Graph as input\n"
++        "        --rgg_scale=<vertex-scale>\n"
++        "        --rgg_nodes=<number-nodes>\n"
++        "        --rgg_thfactor=<threshold-factor>\n"
++        "        --rgg_threshold=<threshold>\n"
++        "        --rgg_vmultipiler=<vmultipiler>\n"
++        "        --rgg_seed=<seed>\n\n"
++        "Optional arguments:\n"
++        "[--device=<device_index>] Set GPU(s) for testing (Default: 0).\n"
++        "[--undirected]            Treat the graph as undirected (symmetric).\n"
++        "[--instrumented]          Keep kernels statics [Default: Disable].\n"
++        "                          total_queued, search_depth and barrier duty.\n"
++        "                          (a relative indicator of load imbalance.)\n"
++        "[--src=<Vertex-ID|randomize|largestdegree>]\n"
++        "                          Begins traversal from the source (Default: 0).\n"
++        "                          If randomize: from a random source vertex.\n"
++        "                          If largestdegree: from largest degree vertex.\n"
++        "[--quick]                 Skip the CPU reference validation process.\n"
++        "[--mark-pred]             Keep both label info and predecessor info.\n"
++        "[--disable-size-check]    Disable frontier queue size check.\n"
++        "[--grid-size=<grid size>] Maximum allowed grid size setting.\n"
++        "[--queue-sizing=<factor>] Allocates a frontier queue sized at: \n"
++        "                          (graph-edges * <factor>). (Default: 1.0)\n"
++        "[--in-sizing=<in/out_queue_scale_factor>]\n"
++        "                          Allocates a frontier queue sized at: \n"
++        "                          (graph-edges * <factor>). (Default: 1.0)\n"
++        "[--v]                     Print verbose per iteration debug info.\n"
++        "[--iteration-num=<num>]   Number of runs to perform the test.\n"
++        "[--traversal-mode=<0|1>]  Set traversal strategy, 0 for Load-Balanced\n"
++        "                          1 for Dynamic-Cooperative (Default: dynamic\n"
++        "                          determine based on average degree).\n"
++        "[--partition-method=<random|biasrandom|clustered|metis>]\n"
++        "                          Choose partitioner (Default use random).\n"
++        "[--delta_factor=<factor>] Delta factor for delta-stepping SSSP.\n"
++        "[--quiet]                 No output (unless --json is specified).\n"
++        "[--json]                  Output JSON-format statistics to STDOUT.\n"
++        "[--jsonfile=<name>]       Output JSON-format statistics to file <name>\n"
++        "[--jsondir=<dir>]         Output JSON-format statistics to <dir>/name,\n"
++        "                          where name is auto-generated.\n"
++    	"[--shared_mem=<0|1>	   Alocate device memory with CudaMalloMAnaged (Default: 0)\n"
++    	"[--mmap_gpu=<0|1>		   Mmap the input binary file onto gpu (default = 0\n"
++    	"[--producer=<0|1>		   Run producer consumer test\n"
++    	"[--percent=<0-100>		   % of input file to update in the producer test\n"
++    	"[--flush=<0|1>		   Flash the page cache before each problem reset\n"
++    );
++}
++
++/**
++ * @brief Displays the SSSP result (i.e., distance from source)
++ *
++ * @tparam VertexId
++ * @tparam SizeT
++ *
++ * @param[in] source_path Search depth from the source for each node.
++ * @param[in] num_nodes Number of nodes in the graph.
++ */
++template<typename VertexId, typename SizeT>
++void DisplaySolution (VertexId *source_path, SizeT num_nodes)
++{
++    if (num_nodes > 40) num_nodes = 40;
++
++    printf("[");
++    for (VertexId i = 0; i < num_nodes; ++i)
++    {
++        PrintValue(i);
++        printf(":");
++        PrintValue(source_path[i]);
++        printf(" ");
++    }
++    printf("]\n");
++}
++
++/******************************************************************************
++ * SSSP Testing Routines
++ *****************************************************************************/
++
++/**
++ * @brief A simple CPU-based reference SSSP ranking implementation.
++ *
++ * @tparam VertexId
++ * @tparam Value
++ * @tparam SizeT
++ * @tparam MARK_PREDECESSORS
++ *
++ * @param[in] graph Reference to the CSR graph we process on
++ * @param[in] node_values Host-side vector to store CPU computed labels for each node
++ * @param[in] node_preds Host-side vector to store CPU computed predecessors for each node
++ * @param[in] src Source node where SSSP starts
++ * @param[in] quiet Don't print out anything to stdout
++ */
++template <
++    typename VertexId,
++    typename SizeT,
++    typename Value,
++    bool     MARK_PREDECESSORS >
++void ReferenceSssp(
++    const Csr<VertexId, SizeT, Value> &graph,
++    Value                             *node_values,
++    VertexId                          *node_preds,
++    VertexId                          src,
++    bool                              quiet)
++{
++    using namespace boost;
++
++    // Prepare Boost Datatype and Data structure
++    typedef adjacency_list<vecS, vecS, directedS, no_property,
++            property <edge_weight_t, unsigned int> > Graph;
++
++    typedef graph_traits<Graph>::vertex_descriptor vertex_descriptor;
++    typedef graph_traits<Graph>::edge_descriptor edge_descriptor;
++
++    typedef std::pair<VertexId, VertexId> Edge;
++
++    Edge   *edges = ( Edge*)malloc(sizeof( Edge) * graph.edges);
++    Value *weight = (Value*)malloc(sizeof(Value) * graph.edges);
++
++    for (SizeT i = 0; i < graph.nodes; ++i)
++    {
++        for (SizeT j = graph.row_offsets[i]; j < graph.row_offsets[i + 1]; ++j)
++        {
++            edges[j] = Edge(i, graph.column_indices[j]);
++            weight[j] = graph.edge_values[j];
++        }
++    }
++
++    Graph g(edges, edges + graph.edges, weight, graph.nodes);
++
++    std::vector<Value> d(graph.nodes);
++    std::vector<vertex_descriptor> p(graph.nodes);
++    vertex_descriptor s = vertex(src, g);
++
++    property_map<Graph, vertex_index_t>::type indexmap = get(vertex_index, g);
++
++    //
++    // Perform SSSP
++    //
++
++    CpuTimer cpu_timer;
++    cpu_timer.Start();
++
++    if (MARK_PREDECESSORS)
++    {
++        dijkstra_shortest_paths(g, s,
++            predecessor_map(boost::make_iterator_property_map(
++                p.begin(), get(boost::vertex_index, g))).distance_map(
++                    boost::make_iterator_property_map(
++                        d.begin(), get(boost::vertex_index, g))));
++    }
++    else
++    {
++        dijkstra_shortest_paths(g, s,
++            distance_map(boost::make_iterator_property_map(
++                d.begin(), get(boost::vertex_index, g))));
++    }
++    cpu_timer.Stop();
++    float elapsed = cpu_timer.ElapsedMillis();
++
++    if (!quiet) { printf("CPU SSSP finished in %lf msec.\n", elapsed); }
++
++    Coo<Value, Value>* sort_dist = NULL;
++    Coo<VertexId, VertexId>* sort_pred = NULL;
++    sort_dist = (Coo<Value, Value>*)malloc(
++                    sizeof(Coo<Value, Value>) * graph.nodes);
++    if (MARK_PREDECESSORS)
++    {
++        sort_pred = (Coo<VertexId, VertexId>*)malloc(
++                        sizeof(Coo<VertexId, VertexId>) * graph.nodes);
++    }
++    graph_traits < Graph >::vertex_iterator vi, vend;
++    for (tie(vi, vend) = vertices(g); vi != vend; ++vi)
++    {
++        sort_dist[(*vi)].row = (*vi);
++        sort_dist[(*vi)].col = d[(*vi)];
++    }
++    std::stable_sort(
++        sort_dist, sort_dist + graph.nodes,
++        RowFirstTupleCompare<Coo<Value, Value> >);
++
++    if (MARK_PREDECESSORS)
++    {
++        for (tie(vi, vend) = vertices(g); vi != vend; ++vi)
++        {
++            sort_pred[(*vi)].row = (*vi);
++            sort_pred[(*vi)].col = p[(*vi)];
++        }
++        std::stable_sort(
++            sort_pred, sort_pred + graph.nodes,
++            RowFirstTupleCompare< Coo<VertexId, VertexId> >);
++    }
++
++    for (SizeT i = 0; i < graph.nodes; ++i)
++    {
++        node_values[i] = sort_dist[i].col;
++    }
++    if (MARK_PREDECESSORS)
++    {
++        for (SizeT i = 0; i < graph.nodes; ++i)
++        {
++            node_preds[i] = sort_pred[i].col;
++        }
++    }
++    if (sort_dist) free(sort_dist);
++    if (sort_pred) free(sort_pred);
++}
++
++long get_random_number(int min, long max)
++{
++  // construct a trivial random generator engine from a time-based seed:
++  unsigned seed = std::chrono::system_clock::now().time_since_epoch().count();
++  std::default_random_engine generator (seed);
++
++  std::uniform_int_distribution<long> distribution(min,max);
++
++  return distribution(generator);
++}
++
++template <typename SizeT, typename Value>
++void producer(int *req_pending, pthread_mutex_t *mutex, int test_duration_sec, std::string fname, SizeT edges, int persent_to_update)
++{
++	std::string tmp(fname + ".val");
++	fileMapping<char> map_addr(tmp.c_str());
++	int iter = 0;
++	//map_addr.map(fname, 0, 0, false) ;
++	Value    *edge_values = (Value *)map_addr.get_addr();
++	UCM_DBG("\n\nMapped file %s on cpu for size %ld edges = %d\n", tmp.c_str(), map_addr.map_len, edges);
++
++	//long int num_updates = (edges / 100) * persent_to_update ;
++	int num_updates = map_addr.map_len / (64*1024) ; //=number of gpu pages holding the file
++	num_updates = num_updates * persent_to_update / 100;
++	if (!num_updates) num_updates = 1;
++
++UCM_DBG("PRODUCER: Will make %ld (=%d percent) updates , fsize=%ld bytes (= %d gpu pages)\n", num_updates, persent_to_update,  map_addr.map_len,
++		map_addr.map_len/(64*1024));
++	//for (i = 0; i < ittr; i++) {
++
++	CpuTimer ctest_duration;
++	ctest_duration.Start();
++	while (ctest_duration.MillisSinceStart() < test_duration_sec * 1000) {
++		for (int upd = 0; upd < num_updates; upd++) {
++			long int gpu_page = get_random_number(0, map_addr.map_len / (64*1024));
++			int value = get_random_number(0, 2048);
++			edge_values[gpu_page * 64 * 1024/ sizeof(int) + 1] = value;
++			//UCM_DBG("PRODUCER:  updated at offse t %d, value = %d req_pending=%d\n", gpu_page * 64 * 1024/ sizeof(int) + 1, value, *req_pending);
++		}
++<<<<<<< HEAD
++		iter++;
++=======
++		map_addr.sync();
++		pthread_mutex_lock(mutex);
++		(*req_pending)+= 10;
++		printf("PRODUCER: prodused (i = %d)\n", i);
++		pthread_mutex_unlock(mutex);
++		sleep(get_random_number(3,6));
++>>>>>>> 8a50750... some more prints & sync after updating by producer
++	}
++//	ctest_duration.Stop();
++	printf("%%%%%%%%%%%%%%%%%%%%%%%%%%% \n PRODUCER: Done: test duration = %ld [sec],  itter = %d\n",  ctest_duration.MillisSinceStart() / 1000, iter);
++
++	exit(0);
++}
++
++/**
++ * @brief Run SSSP tests
++ *
++ * @tparam VertexId
++ * @tparam Value
++ * @tparam SizeT
++ * @tparam MARK_PREDECESSORS
++ *
++ * @param[in] info Pointer to info contains parameters and statistics.
++ *
++ * \return cudaError_t object which indicates the success of
++ * all CUDA function calls.
++ */
++template <
++    typename VertexId,
++    typename SizeT,
++    typename Value,
++    bool MARK_PREDECESSORS >
++cudaError_t RunTests(Info<VertexId, SizeT, Value> *info)
++{
++    typedef SSSPProblem < VertexId,
++            SizeT,
++            Value,
++            MARK_PREDECESSORS > Problem;
++
++    typedef SSSPEnactor < Problem > Enactor;
++
++    // parse configurations from mObject info
++    Csr<VertexId, SizeT, Value> *graph = info->csr_ptr;
++    VertexId    src                 = info->info["source_vertex"    ].get_int64();
++    int         max_grid_size       = info->info["max_grid_size"    ].get_int  ();
++    int         num_gpus            = info->info["num_gpus"         ].get_int  ();
++    double      max_queue_sizing    = info->info["max_queue_sizing" ].get_real ();
++    double      max_queue_sizing1   = info->info["max_queue_sizing1"].get_real ();
++    double      max_in_sizing       = info->info["max_in_sizing"    ].get_real ();
++    std::string partition_method    = info->info["partition_method" ].get_str  ();
++    double      partition_factor    = info->info["partition_factor" ].get_real ();
++    int         partition_seed      = info->info["partition_seed"   ].get_int  ();
++    bool        quiet_mode          = info->info["quiet_mode"       ].get_bool ();
++    bool        quick_mode          = info->info["quick_mode"       ].get_bool ();
++    bool        stream_from_host    = info->info["stream_from_host" ].get_bool ();
++    std::string traversal_mode      = info->info["traversal_mode"   ].get_str  ();
++    bool        instrument          = info->info["instrument"       ].get_bool ();
++    bool        debug               = info->info["debug_mode"       ].get_bool ();
++    bool        size_check          = info->info["size_check"       ].get_bool ();
++    int         iterations          = info->info["num_iteration"    ].get_int  ();
++    int         delta_factor        = info->info["delta_factor"     ].get_int  ();
++    std::string src_type            = info->info["source_type"      ].get_str  ();
++    int      src_seed               = info->info["source_seed"      ].get_int  ();
++    int      communicate_latency    = info->info["communicate_latency"].get_int ();
++    float    communicate_multipy    = info->info["communicate_multipy"].get_real();
++    int      expand_latency         = info->info["expand_latency"    ].get_int ();
++    int      subqueue_latency       = info->info["subqueue_latency"  ].get_int ();
++    int      fullqueue_latency      = info->info["fullqueue_latency" ].get_int ();
++    int      makeout_latency        = info->info["makeout_latency"   ].get_int ();
++    if (max_queue_sizing < 1.2) max_queue_sizing=1.2;
++    if (max_in_sizing < 0) max_in_sizing = 1.0;
++    if (communicate_multipy > 1) max_in_sizing *= communicate_multipy;
++
++    CpuTimer    cpu_timer;
++    cudaError_t retval              = cudaSuccess;
++
++    cpu_timer.Start();
++    json_spirit::mArray device_list = info->info["device_list"].get_array();
++    int* gpu_idx = new int[num_gpus];
++    for (int i = 0; i < num_gpus; i++) gpu_idx[i] = device_list[i].get_int();
++
++    // TODO: remove after merge mgpu-cq
++    ContextPtr   *context = (ContextPtr*)  info->context;
++    cudaStream_t *streams = (cudaStream_t*)info->streams;
++
++    // Allocate host-side array (for both reference and GPU-computed results)
++    Value    *reference_labels      = new Value[graph->nodes];
++    Value    *h_labels              = new Value[graph->nodes];
++    Value    *reference_check_label = (quick_mode) ? NULL : reference_labels;
++    VertexId *reference_preds       = MARK_PREDECESSORS ? new VertexId[graph->nodes] : NULL;
++    VertexId *h_preds               = MARK_PREDECESSORS ? new VertexId[graph->nodes] : NULL;
++    VertexId *reference_check_pred  = (quick_mode || !MARK_PREDECESSORS) ? NULL : reference_preds;
++
++    size_t *org_size = new size_t[num_gpus];
++    for (int gpu = 0; gpu < num_gpus; gpu++)
++    {
++        size_t dummy;
++        if (retval = util::SetDevice(gpu_idx[gpu])) return retval;
++        if (retval = util::GRError(cudaMemGetInfo(&(org_size[gpu]), &dummy),
++            "cudaMemGetInfo failed", __FILE__, __LINE__)) return retval;
++    }
++
++    // Allocate problem on GPU
++    Problem *problem = new Problem;
++    if (retval = util::GRError(problem->Init(
++        stream_from_host,
++        graph,
++        NULL,
++        num_gpus,
++        gpu_idx,
++        partition_method,
++        streams,
++        delta_factor,
++        max_queue_sizing,
++        max_in_sizing,
++        partition_factor,
++        partition_seed, info->shared_mem, info->mmap_gpu),
++        "SSSP Problem Init failed", __FILE__, __LINE__))
++        return retval;
++
++    // Allocate SSSP enactor map
++    Enactor* enactor = new Enactor(
++        num_gpus, gpu_idx, instrument, debug, size_check);
++    if (retval = util::GRError(enactor->Init(
++        context, problem, max_grid_size, traversal_mode),
++        "SSSP Enactor Init failed", __FILE__, __LINE__))
++        return retval;
++
++    enactor -> communicate_latency = communicate_latency;
++    enactor -> communicate_multipy = communicate_multipy;
++    enactor -> expand_latency      = expand_latency;
++    enactor -> subqueue_latency    = subqueue_latency;
++    enactor -> fullqueue_latency   = fullqueue_latency;
++    enactor -> makeout_latency     = makeout_latency;
++
++    if (retval = util::SetDevice(gpu_idx[0])) return retval;
++    if (retval = util::latency::Test(
++        streams[0], problem -> data_slices[0] -> latency_data,
++        communicate_latency,
++        communicate_multipy,
++        expand_latency,
++        subqueue_latency,
++        fullqueue_latency,
++        makeout_latency)) return retval;
++
++    cpu_timer.Stop();
++    info -> info["preprocess_time"] = cpu_timer.ElapsedMillis();
++
++    // perform SSSP
++    double total_elapsed  = 0.0;
++    double single_elapsed = 0.0;
++    double max_elapsed    = 0.0;
++    double min_elapsed    = 1e10;
++    json_spirit::mArray process_times;
++    if (src_type == "random2")
++    {
++        if (src_seed == -1) src_seed = time(NULL);
++        if (!quiet_mode)
++            printf("src_seed = %d\n", src_seed);
++        srand(src_seed);
++    }
++    if (!quiet_mode) printf("Using traversal mode %s\n", traversal_mode.c_str());
++
++    pthread_mutexattr_t attributes;
++    int handle;
++    char *shared_memory;
++    pthread_mutex_t *mutex;
++   // pid_t pid;
++    int *req_pending;
++    std::thread *t1;
++
++    CpuTimer test_duration;
++    if (info->producer) {
++		UCM_DBG("Initialize and start Producer thread\n");
++		pthread_mutexattr_init(&attributes);
++		pthread_mutexattr_setpshared(&attributes, PTHREAD_PROCESS_SHARED);
++
++		handle = shm_open("/shm", O_CREAT | O_RDWR, 0777);
++		ftruncate(handle, 2048*sizeof(int));
++		shared_memory = (char *)mmap(0, 2048*sizeof(int), PROT_READ | PROT_WRITE,
++						   MAP_SHARED, handle, 0);
++		// mutex share
++		mutex = (pthread_mutex_t*)shared_memory;
++		pthread_mutex_init(mutex, &attributes);
++
++		pthread_mutexattr_destroy(&attributes);
++
++		// variable share
++		req_pending = (int*)(shared_memory + sizeof(pthread_mutex_t)*2);
++		*req_pending = 0;
++	//	printf("\n\nDBG: req_pending=0x%llx, mutex = 0x%llx\n\n", req_pending, mutex );
++		t1 = new std::thread(producer<SizeT, Value>, req_pending, mutex, iterations, graph->f_in, graph->edges, info->percent);
++    }
++
++    test_duration.Start();
++    int iter = 0;
++    //for (int iter = 0; iter < iterations; ++iter)
++    while (test_duration.MillisSinceStart() / 1000 < iterations)
++    {
++    	//std::string input = "";
++    	//getline(std::cin, input);
++//    	if  (info->producer) {
++    		//wait for producer
++    	//	UCM_DBG("CONSUMER: waiting on count\n");
++<<<<<<< HEAD
++ //   		while (*req_pending == 0);
++    	//	UCM_DBG("CONSUMER: waiting on count done\n");
++   // 		sleep(5);
++   // 	}
++    	sleep(50);
++=======
++    		while (*req_pending == 0);
++    		UCM_DBG("CONSUMER: waiting on count done %d\n",*req_pending);
++    	//	char ch = getchar();
++    		sleep(5);
++    	}
++>>>>>>> 8a50750... some more prints & sync after updating by producer
++        if (!quiet_mode)
++        {
++            printf("__________________________\n"); fflush(stdout);
++        }
++        if (src_type == "random2")
++        {
++            bool src_valid = false;
++            while (!src_valid)
++            {
++                src = rand() % graph -> nodes;
++                if (graph -> row_offsets[src] != graph -> row_offsets[src+1])
++                    src_valid = true;
++            }
++        }
++
++        if (!quick_mode) {
++        	UCM_DBG("Read graphs data for comparing to cpu\n");
++        	graph->read_edge_values();
++        }
++
++        if (info->flush) {
++        	char cmdbuf[256];
++        	std::string tmp(graph->f_in + ".val");
++
++			snprintf(cmdbuf, sizeof(cmdbuf), "vmtouch -ev %s",tmp.c_str());
++			if ( system(cmdbuf) )
++				fprintf(stderr, "drop_cache write failed! The tests results are not accurate/trustworthy\n");
++			else
++				printf("Dropped caches... for file %s\n", tmp.c_str());
++			sleep(5);
++        }
++ //       cpu_timer.Start();
++        if (retval = util::GRError(problem->Reset(
++            src, enactor->GetFrontierType(),
++            max_queue_sizing, max_queue_sizing1),
++            "SSSP Problem Data Reset Failed", __FILE__, __LINE__))
++            return retval;
++
++        if (retval = util::GRError(enactor->Reset(),
++            "SSSP Enactor Reset failed", __FILE__, __LINE__))
++            return retval;
++
++        for (int gpu = 0; gpu < num_gpus; gpu++)
++        {
++            if (retval = util::SetDevice(gpu_idx[gpu]))
++                return retval;
++            if (retval = util::GRError(cudaDeviceSynchronize(),
++                "cudaDeviceSynchronize failed", __FILE__, __LINE__))
++                return retval;
++        }
++ //       cpu_timer.Stop();
++
++//        printf("Reset_timing,%lf,ms\n", cpu_timer.ElapsedMillis());
++
++        cpu_timer.Start();
++        if (retval = util::GRError(enactor->Enact(src, traversal_mode),
++            "SSSP Problem Enact Failed", __FILE__, __LINE__))
++            return retval;
++        cpu_timer.Stop();
++        single_elapsed = cpu_timer.ElapsedMillis();
++        total_elapsed += single_elapsed;
++        process_times.push_back(single_elapsed);
++        if (single_elapsed > max_elapsed) max_elapsed = single_elapsed;
++        if (single_elapsed < min_elapsed) min_elapsed = single_elapsed;
++        if (!quiet_mode)
++        {
++            printf("--------------------------\n"
++                "ittr,%d,kernel_timing,%lf,ms,src,%lld,#iteration,%lld\n",
++                iter, single_elapsed, (long long)src,
++                (long long)enactor -> enactor_stats -> iteration);
++            fflush(stdout);
++        }
++#if 1
++        // compute reference CPU SSSP solution for source-distance
++        if (!quick_mode)
++        {
++        	printf("Now compare to cpu...\n");
++            if (!quiet_mode) { printf("Computing reference value ...\n"); }
++            ReferenceSssp<VertexId, SizeT, Value, MARK_PREDECESSORS>(
++                *graph,
++                reference_check_label,
++                reference_check_pred,
++                src,
++                quiet_mode);
++            if (!quiet_mode) { printf("\n"); }
++        }
++
++        cpu_timer.Start();
++        // Copy out results
++        if (retval = util::GRError(problem->Extract(h_labels, h_preds),
++            "SSSP Problem Data Extraction Failed", __FILE__, __LINE__))
++            return retval;
++
++        if (!quick_mode) {
++            for (SizeT i = 0; i < graph->nodes; i++)
++            {
++                if (reference_check_label[i] == -1)
++                {
++                    reference_check_label[i] = util::MaxValue<Value>();
++                }
++            }
++        }
++
++        if (!quiet_mode)
++        {
++            // Display Solution
++            printf("\nFirst 40 labels of the GPU result.\n");
++            DisplaySolution(h_labels, graph->nodes);
++        }
++        // Verify the result
++        if (!quick_mode)
++        {
++            if (!quiet_mode) { printf("Label Validity: "); }
++            int error_num = CompareResults(
++                                h_labels, reference_check_label,
++                                graph->nodes, true, quiet_mode);
++            if (error_num > 0)
++            {
++                if (!quiet_mode) { printf("%d errors occurred.\n", error_num); }
++            }
++            if (!quiet_mode)
++            {
++                printf("\nFirst 40 labels of the reference CPU result.\n");
++                DisplaySolution(reference_check_label, graph->nodes);
++            }
++        }
++
++        info->ComputeTraversalStats(  // compute running statistics
++            enactor->enactor_stats.GetPointer(), total_elapsed, h_labels);
++#endif
++#if 0
++        if (info->producer) {
++        	//signal producer that I'm done processsing
++        	pthread_mutex_lock(mutex);
++			if (*req_pending > 0) {
++				printf("CONSUMER: consumed i = %d req_pending=%d\n", iter, *req_pending);
++				(*req_pending)=0;
++			}
++			else printf("\n\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!ERROR - CONSUMER: producer was too fasr\n\n\n");
++			//printf("Child process increased the count to %d\n", *count);
++			pthread_mutex_unlock(mutex);
++        }
++#endif
++        iter++;
++    }
++
++    test_duration.Stop();
++    printf("%%%%%%%%%%%%%%%%%%%%%%%%%%% \n CONSUMER Done: test duration = %ld [sec], itter = %d\n", test_duration.ElapsedMillis(), iter);
++    total_elapsed /= iterations;
++    info -> info["process_times"] = process_times;
++    info -> info["min_process_time"] = min_elapsed;
++    info -> info["max_process_time"] = max_elapsed;
++
++    if (info->producer) {
++    	printf("CONSUMER: waiting for child process to join\n");
++    	t1->join();
++		munmap(shared_memory, 2048*sizeof(int));
++		shm_unlink("/shm");
++    }
++
++    if (!quiet_mode)
++    {
++        if (MARK_PREDECESSORS)
++        {
++            printf("\nFirst 40 preds of the GPU result.\n");
++            DisplaySolution(h_preds, graph->nodes);
++            if (reference_check_label != NULL)
++            {
++                printf("\nFirst 40 preds of the reference CPU result (could be different because the paths are not unique).\n");
++                DisplaySolution(reference_check_pred, graph->nodes);
++            }
++        }
++    }
++
++    if (!quiet_mode)
++    {
++        Display_Memory_Usage(num_gpus, gpu_idx, org_size, problem);
++#ifdef ENABLE_PERFORMANCE_PROFILING
++        Display_Performance_Profiling(enactor);
++#endif
++    }
++
++    // Clean up
++    if (org_size        ) {delete[] org_size        ; org_size         = NULL;}
++    if (enactor         )
++    {
++        if (retval = util::GRError(enactor -> Release(),
++            "BFS Enactor Release failed", __FILE__, __LINE__))
++            return retval;
++        delete   enactor         ; enactor          = NULL;
++    }
++    if (problem         )
++    {
++        if (retval = util::GRError(problem -> Release(),
++            "BFS Problem Release failed", __FILE__, __LINE__))
++            return retval;
++        delete   problem         ; problem          = NULL;
++    }
++    if (reference_labels) {delete[] reference_labels; reference_labels = NULL;}
++    if (h_labels        ) {delete[] h_labels        ; h_labels         = NULL;}
++    if (reference_preds ) {delete[] reference_preds ; reference_preds  = NULL;}
++    if (h_preds         ) {delete[] h_preds         ; h_preds          = NULL;}
++    if (gpu_idx         ) {delete[] gpu_idx         ; gpu_idx          = NULL;}
++    cpu_timer.Stop();
++    info->info["postprocess_time"] = cpu_timer.ElapsedMillis();
++    return retval;
++}
++
++/**
++ * @brief RunTests entry
++ *
++ * @tparam VertexId
++ * @tparam Value
++ * @tparam SizeT
++ *
++ * @param[in] info Pointer to info contains parameters and statistics.
++ *
++ * \return cudaError_t object which indicates the success of
++ * all CUDA function calls.
++ */
++template <
++    typename    VertexId,
++    typename    SizeT,
++    typename    Value>
++cudaError_t RunTests_mark_predecessors(Info<VertexId, SizeT, Value> *info)
++{
++    if (info->info["mark_predecessors"].get_bool())
++        return RunTests<VertexId, SizeT, Value, /*INSTRUMENT,
++                 DEBUG, SIZE_CHECK,*/ true>(info);
++    else
++        return RunTests<VertexId, SizeT, Value, /*INSTRUMENT,
++                 DEBUG, SIZE_CHECK,*/ false>(info);
++}
++
++/******************************************************************************
++* Main
++******************************************************************************/
++
++template <
++    typename VertexId,  // Use int as the vertex identifier
++    typename SizeT,     // Use int as the graph size type
++    typename Value>     // Use int as the value type
++int main_(CommandLineArgs *args)
++{
++    CpuTimer cpu_timer, cpu_timer2;
++    cpu_timer.Start();
++    Csr <VertexId, SizeT, Value> csr(false);  // graph we process on
++    Info<VertexId, SizeT, Value> *info = new Info<VertexId, SizeT, Value>;
++
++    // graph construction or generation related parameters
++    info->info["undirected"] = args -> CheckCmdLineFlag("undirected");
++    info->info["edge_value"] = true;  // require per edge weight values
++    info->info["random_edge_value"] = args -> CheckCmdLineFlag("random-edge-value");
++
++    cpu_timer2.Start();
++    info->Init("SSSP", *args, csr);  // initialize Info structure
++
++    // force edge values to be 1, don't enable this unless you really want to
++    //for (SizeT e=0; e < csr.edges; e++)
++    //    csr.edge_values[e] = 1;
++    cpu_timer2.Stop();
++    info->info["load_time"] = cpu_timer2.ElapsedMillis();
++
++    cudaError_t retval = RunTests_mark_predecessors<VertexId, SizeT, Value>(info);  // run test
++    cpu_timer.Stop();
++    info->info["total_time"] = cpu_timer.ElapsedMillis();
++
++    if (!(info->info["quiet_mode"].get_bool()))
++    {
++        info->DisplayStats();  // display collected statistics
++    }
++
++    info->CollectInfo();  // collected all the info and put into JSON mObject
++    if (info) {delete info; info=NULL;}
++    return retval;
++}
++
++template <
++    typename VertexId, // the vertex identifier type, usually int or long long
++    typename SizeT   > // the size tyep, usually int or long long
++int main_Value(CommandLineArgs *args)
++{
++// Disabled becaus atomicMin(long long*, long long) is not available
++//    if (args -> CheckCmdLineFlag("64bit-Value"))
++//        return main_<VertexId, SizeT, long long>(args);
++//    else
++        return main_<VertexId, SizeT, int      >(args);
++}
++
++template <
++    typename VertexId>
++int main_SizeT(CommandLineArgs *args)
++{
++// disabled to reduce compile time
++    if (args -> CheckCmdLineFlag("64bit-SizeT"))
++        return main_Value<VertexId, long long>(args);
++    else
++        return main_Value<VertexId, int      >(args);
++}
++
++int main_VertexId(CommandLineArgs *args)
++{
++    // disabled, because oprtr::filter::KernelPolicy::SmemStorage is too large for 64bit VertexId
++    //if (args -> CheckCmdLineFlag("64bit-VertexId"))
++    //    return main_SizeT<long long>(args);
++    //else
++        return main_SizeT<int      >(args);
++}
++
++int main(int argc, char** argv)
++{
++    CommandLineArgs args(argc, argv);
++    int graph_args = argc - args.ParsedArgc() - 1;
++    if (argc < 2 || graph_args < 1 || args.CheckCmdLineFlag("help"))
++    {
++        Usage();
++        return 1;
++    }
++
++    return main_VertexId(&args);
++}
++// Leave this at the end of the file
++// Local Variables:
++// mode:c++
++// c-file-style: "NVIDIA"
++// End:
+diff --git a/tests/sssp/ucm_mmap.cuh b/tests/sssp/ucm_mmap.cuh
+new file mode 100644
+index 0000000..ca1d695
+--- /dev/null
++++ b/tests/sssp/ucm_mmap.cuh
+@@ -0,0 +1,307 @@
++#ifndef __UCM_MMAP_H_
++#define __UCM_MMAP_H_
++
++//#define __KERNEL__
++#include "shared_test.h"
++#include <stdio.h>
++#include <cuda_runtime.h>
++#include <math.h>
++#include <unistd.h>
++#include <fcntl.h>
++#include <sys/ioctl.h>
++#include <dlfcn.h>
++#include <errno.h>
++#include <uvm_ioctl.h>
++//#include "mmap_cu.h"
++#include <sys/time.h>
++
++#include "ucm_mmap.h"
++
++#define UCM_ERR(fmt, ...) \
++	printf("UCM_ERR: %s(): " fmt, __func__, ##__VA_ARGS__);
++
++#define UCM_DBG(fmt, ...) \
++	printf("UCM_DBG: %s(): " fmt, __func__, ##__VA_ARGS__);
++#define MAP_ON_GPU	0x80000
++#define PREFETCH_ASYNC  0x40000
++#define NOT_PREFETCH_ASYNC 0xFFFFFFFFFFFBFFFF
++
++#define MAP_FAILED ((void*)-1)
++#define MAP_HUGETLB	0x100000	/* create a huge page mapping */
++typedef void *(*orig_mmap_f_type)(void *addr, size_t length, int prot,
++			int flags, int fd, off_t offset);
++typedef int (*orig_munmap_f_type)(void *addr, size_t length);
++
++// This will output the proper CUDA error strings in the event that a
++// CUDA host call returns an error
++#define checkCudaErrors(err)  __checkCudaErrors (err, __FILE__, __LINE__)
++
++inline void __checkCudaErrors(cudaError err, const char *file, const int line) {
++    if(cudaSuccess != err) {
++        fprintf(stderr, "%s(%i) : CUDA Runtime API error %d: %s.\n",file,
++        				line, (int)err, cudaGetErrorString(err));
++        exit(-1);
++    }
++}
++
++struct file_map_struct
++{
++	void *cuda_ptr;
++	void *cpu_ptr;
++	int taken;
++};
++
++#define SUPPORTED_FILES_MAPPED 10
++static struct file_map_struct mappings_arr[SUPPORTED_FILES_MAPPED];
++static int mappings_arr_idx = 0;
++static int mappings_cnt = 0;
++
++#define NVIDI_UVM_CHAR_DEV "/dev/nvidia-uvm"
++int nvidia_uvm_fd = -1;
++static int open_nvidia(void)
++{
++	nvidia_uvm_fd = open(NVIDI_UVM_CHAR_DEV, O_RDWR);
++	if (nvidia_uvm_fd < 0){
++		UCM_ERR("Failed opening %s err = %d\n", NVIDI_UVM_CHAR_DEV, nvidia_uvm_fd);
++		return -1;
++	}
++	UCM_DBG("opened nvidia file\n");
++	return 0;
++}
++
++static void close_nvidia(void)
++{
++	close(nvidia_uvm_fd);
++	nvidia_uvm_fd = -1;
++	UCM_DBG(" Closed nvidia-uvm\n");
++}
++
++static int map_vma_ioctl(unsigned long long uvm_base,
++						 unsigned long long cpu_base, int map)
++{
++	UVM_MAP_VMA_RANGE_PARAMS params;
++	UVM_UNMAP_VMA_RANGE_PARAMS uparams;
++
++	params.uvm_base = uvm_base;
++	params.cpu_base = cpu_base;
++
++	uparams.uvm_base = uvm_base;
++
++	if (map) {
++		if (ioctl(nvidia_uvm_fd, UVM_MAP_VMA_RANGE, &params) == -1) {
++    			UCM_ERR("ioctl to uvm failed\n");
++    			return -1;
++    		}
++    		//UCM_DBG("map ioclt returned %u\n", params.rmStatus);
++	} else {
++		if (ioctl(nvidia_uvm_fd, UVM_UNMAP_VMA_RANGE, &uparams) == -1) {
++            		UCM_ERR("ioctl to uvm failed\n");
++            		return -1;
++        	}
++		//UCM_DBG("unmap ioclt returned %u\n", uparams.rmStatus);
++	}
++	return 0;
++}
++static int touch_pages(unsigned long long uvm_base, unsigned long length)
++{
++	UVM_TOUCH_RANGE_PARAMS params;
++	char c;
++
++	params.uvm_base = uvm_base;
++	params.start_addr = uvm_base;
++	params.length = length;
++	if (ioctl(nvidia_uvm_fd, UVM_TOUCH_RANGE, &params) == -1) {
++                UCM_ERR("ioctl to uvm failed with code %u\n", params.rmStatus);
++        	return -1;
++	}
++//	printf("touch pages: press any key to continue...\n");
++//        c = getchar();
++	return 0;
++}
++
++void *map_file_on_gpu(void *addr, size_t length, int prot, int flags,
++                  int fd, off_t offset)
++{
++	long int pagenum=0;
++	bool touch_data = false;
++	orig_mmap_f_type orig_mmap;
++	orig_mmap = (orig_mmap_f_type)dlsym(RTLD_NEXT,"mmap");
++
++	struct file_map_struct *mapping = &mappings_arr[mappings_arr_idx++];
++
++	if (flags & PREFETCH_ASYNC) {
++		touch_data = true;
++		flags &= NOT_PREFETCH_ASYNC;
++		printf("got PREFETCH_ASYNC. revert it: flags = 0x%lx\n", flags);
++	}
++	if (mapping->taken) {
++		UCM_ERR("mapping taken!!\n");
++		//TODO: handle this case/ a lock might be needed
++	}
++	mapping->taken = 1;
++	mappings_cnt++;
++	UCM_DBG("Enter for mappings_arr_idx = %d total mapped = %d\n",
++			mappings_arr_idx - 1, mappings_cnt);
++	mapping->cpu_ptr = 0;
++	mapping->cpu_ptr = orig_mmap(addr, length, prot, flags , fd, offset);
++	if (mapping->cpu_ptr == MAP_FAILED)
++	{
++	 	printf("Oh dear, something went wrong with orig_mmap()! %s, errno=%d, length=%lu\n", strerror(errno), errno, length);
++	    	exit(EXIT_FAILURE);
++	}
++	checkCudaErrors( cudaMallocManaged((void **)&mapping->cuda_ptr, length, cudaMemAttachGlobal) );
++	UCM_DBG("Allocated  0x%llx as managed size=%lu cpu_ptr = 0x%llx\n",
++			mapping->cuda_ptr, length, mapping->cpu_ptr );
++
++	/* Need to try open the file after first cudaMalloc. Otherwise it's not created */
++	if (nvidia_uvm_fd < 0 && open_nvidia()) {
++        	//TODO: Handle this err properly
++        	return NULL;
++    	}
++
++	/* Now issue IOCTL to uvm to set up the connection in uvm_va_space */
++	if (map_vma_ioctl((unsigned long long)mapping->cuda_ptr,
++					  (unsigned long long)mapping->cpu_ptr, 1)) {
++    		UCM_ERR("ioctl to uvm failed\n");
++    		//TODO: handle properly
++    		return NULL;
++    	}
++
++	if (touch_pages((unsigned long long)mapping->cuda_ptr, length)) {
++                UCM_ERR("touch pages failed\n");
++                //TODO: handle properly
++//                return NULL;
++       }
++#if 0
++if (!touch_data) {
++	checkCudaErrors( cudaMemPrefetchAsync(mapping->cuda_ptr, length, -1, 0) );
++	UCM_DBG("cudaMemPrefetchAsync to host\n");
++	checkCudaErrors(cudaDeviceSynchronize());
++        checkCudaErrors( cudaGetLastError() );
++} else {
++#endif
++	if (1 /*length / 4096 >= 48*/) {
++		long start, end;
++    		struct timeval timecheck;
++ 		gettimeofday(&timecheck, NULL);
++    		start = (long)timecheck.tv_sec * 1000 + (long)timecheck.tv_usec / 1000;
++		UCM_DBG("Have in total %d pages, file length = %ld \n",
++				length/4096, length);
++		while (pagenum * 4096 < length) {
++			char *tmp = (char *)(mapping->cuda_ptr) + pagenum * 4096;
++	//		char *tmp2 = (char *)(mapping->cpu_ptr) + pagenum * 4096;
++			if (*tmp == '!')
++				UCM_ERR("hit :) %d\n", pagenum);
++	//		UCM_DBG("touching page - %d (idx=%d). virt addr = %p. on managed = %c, on cpu = %c\n",
++	//			pagenum, pagenum*4096, (char *)mapping->cuda_ptr + pagenum * 4096,  *tmp, *tmp2);
++		//	*tmp = '!';
++			pagenum++;
++		}
++		gettimeofday(&timecheck, NULL);
++    		end = (long)timecheck.tv_sec * 1000 + (long)timecheck.tv_usec / 1000;
++ 		printf("touch_pages,%ld,ms\n", (end - start));
++	}
++//}
++
++	if (touch_pages((unsigned long long)mapping->cuda_ptr, length)) {
++                UCM_ERR("touch pages second time failed\n");
++                //TODO: handle properly
++//                return NULL;
++        }
++	UCM_DBG("mmaped length=%ld\n", length);
++	return mapping->cuda_ptr;
++}
++
++void *gmmap(void *addr, size_t length, int prot, int flags,
++                  int fd, off_t offset)
++{
++	orig_mmap_f_type orig_mmap;
++//	UCM_DBG("enter for addr=%p\n", addr);
++	orig_mmap = (orig_mmap_f_type)dlsym(RTLD_NEXT,"mmap");
++
++	if (!(flags & MAP_ON_GPU))
++		return orig_mmap(addr, length, prot, flags, fd, offset);
++
++    return map_file_on_gpu(addr, length, prot, flags, fd, offset);
++}
++
++int gmunmap (void *addr, size_t length)
++{
++	int i;
++	orig_munmap_f_type orig_munmap;
++	orig_munmap = (orig_munmap_f_type)dlsym(RTLD_NEXT,"munmap");
++UCM_DBG("just return for now\n");
++return 0;
++	for (i = 0; i < mappings_cnt; i++)
++		if (mappings_arr[i].cuda_ptr == addr && mappings_arr[i].taken) {
++			struct file_map_struct *mapping = &mappings_arr[i];
++			mappings_arr[i].taken = 0;
++			mappings_cnt--;
++			UCM_DBG("addr %p was gpu mapped for cpu addr %p\n",
++					addr, mapping->cpu_ptr);
++
++    			/* Now issue IOCTL to uvm to remove the connection in uvm_va_space */
++    			if (map_vma_ioctl((unsigned long long)mapping->cuda_ptr,
++            	        	  (unsigned long long)mapping->cpu_ptr, 0)) {
++   	    			UCM_ERR("ioctl to uvm failed\n");
++	        		//TODO: handle properly
++	   		}
++			//giving an err. need to understand why
++			checkCudaErrors( cudaFree(addr) );
++
++			if (!mappings_cnt)
++                close_nvidia();
++
++			return orig_munmap(mapping->cpu_ptr, length);
++		}
++    //UCM_DBG("original munmap for addr=%p\n", addr);
++    return orig_munmap(addr, length);
++}
++
++//map the pages into cpu_ptr vma
++int maquire(void *start, size_t length, int flags) {
++	int i;
++	long int pagenum=0;
++	struct file_map_struct *mapping = NULL;
++
++	for (i = 0; i < mappings_cnt; i++)
++		if (mappings_arr[i].cuda_ptr == start && mappings_arr[i].taken) {
++			mapping = &mappings_arr[i];
++			UCM_DBG("addr %p was gpu mapped for cpu addr %p\n",
++					start, mapping->cpu_ptr);
++		}
++	if (!mapping)
++		return -1;
++
++	if (1 /*length / 4096 >= 48*/) {
++		long start, end;
++			struct timeval timecheck;
++		gettimeofday(&timecheck, NULL);
++			start = (long)timecheck.tv_sec * 1000 + (long)timecheck.tv_usec / 1000;
++		UCM_DBG("Have in total %d pages, file length = %ld \n",
++				length/4096, length);
++		while (pagenum * 4096 < length) {
++	//		char *tmp = (char *)(mapping->cuda_ptr) + pagenum * 4096;
++			char *tmp2 = (char *)(mapping->cpu_ptr) + pagenum * 4096;
++			if (*tmp2 == '!')
++				UCM_ERR("hit :) %d\n", pagenum);
++	//		UCM_DBG("touching page - %d (idx=%d). virt addr = %p. on managed = %c, on cpu = %c\n",
++	//			pagenum, pagenum*4096, (char *)mapping->cuda_ptr + pagenum * 4096,  *tmp, *tmp2);
++		//	*tmp = '!';
++			pagenum++;
++		}
++		gettimeofday(&timecheck, NULL);
++			end = (long)timecheck.tv_sec * 1000 + (long)timecheck.tv_usec / 1000;
++		//printf("touch_pages,%ld,ms\n", (end - start));
++	}
++
++	return syscall(327, start, length, flags);
++}
++
++int mrelease(void *start, size_t len, int flags) {
++	return syscall(328, start, len, flags);
++}
++
++
++
++#endif
+-- 
+2.7.4
+
